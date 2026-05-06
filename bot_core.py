@@ -127,9 +127,10 @@ DEFAULT_SETTING_VALUES = asdict(BotSettings())
 # =========================================================
 
 class GameBot:
-    def __init__(self, log_func=None, settings=None):
+    def __init__(self, log_func=None, settings=None, minimize_func=None):
         self.log_func = log_func or print
         self.settings = settings or BotSettings()
+        self.minimize_func = minimize_func
 
         self.running = False
         self.paused = False
@@ -179,6 +180,117 @@ class GameBot:
             pyautogui.moveTo(w // 2, h // 2, duration=0.08)
         except Exception as e:
             self.log(f"鼠标回中失败：{e}")
+
+    def minimize_ui_window(self):
+        """
+        最小化主 UI，避免 UI 遮挡搜索框等按钮。
+        minimize_func 由 main.py 传入。
+        """
+        if self.minimize_func is None:
+            self.log("没有传入 UI 最小化函数，跳过最小化")
+            return False
+
+        try:
+            self.minimize_func()
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            self.log(f"最小化 UI 失败：{e}")
+            return False
+
+    def resize_all_browser_windows(self, width=1280, height=800, move_to_left_top=True):
+        """
+        将当前所有常见浏览器窗口统一调整为指定尺寸。
+
+        这样完整流程开始前，游戏浏览器的画面比例会先固定，
+        后续模板匹配更稳定。
+
+        说明：
+        1. 不寻找具体游戏窗口，只处理所有浏览器窗口。
+        2. 自动排除本工具窗口“李傕列传”。
+        3. 如果窗口处于最大化状态，会先 restore，再 resize。
+        4. 默认把浏览器移动到左上角，方便模板在固定画面下匹配。
+        """
+        self.log(f"完整流程第一步：调整所有浏览器窗口为 {width}x{height}")
+
+        browser_keywords = [
+            "chrome",
+            "edge",
+            "firefox",
+            "opera",
+            "brave",
+            "vivaldi",
+            "browser",
+            "浏览器",
+            "谷歌",
+            "火狐",
+            "microsoft edge",
+            "360极速",
+            "360安全",
+            "qq浏览器",
+            "搜狗高速",
+            "uc浏览器",
+        ]
+
+        try:
+            windows = pyautogui.getAllWindows()
+        except Exception as e:
+            self.log(f"获取窗口列表失败：{e}")
+            return False
+
+        changed_count = 0
+
+        for win in windows:
+            try:
+                title = win.title or ""
+            except Exception:
+                continue
+
+            if not title.strip():
+                continue
+
+            lower_title = title.lower()
+
+            # 排除自己的 tkinter UI
+            if "李傕列传" in title:
+                continue
+
+            is_browser = any(key in lower_title for key in browser_keywords)
+
+            if not is_browser:
+                continue
+
+            try:
+                self.log(f"调整浏览器窗口：{title}")
+
+                # 最大化窗口必须先还原，否则 resizeTo 可能无效
+                if getattr(win, "isMaximized", False):
+                    win.restore()
+                    time.sleep(0.3)
+
+                # 最小化窗口也先还原
+                if getattr(win, "isMinimized", False):
+                    win.restore()
+                    time.sleep(0.3)
+
+                if move_to_left_top:
+                    win.moveTo(0, 0)
+                    time.sleep(0.15)
+
+                win.resizeTo(width, height)
+                time.sleep(0.25)
+
+                changed_count += 1
+
+            except Exception as e:
+                self.log(f"调整窗口失败：{title} | {e}")
+
+        if changed_count == 0:
+            self.log("没有检测到浏览器窗口，跳过窗口尺寸调整")
+            return False
+
+        self.log(f"浏览器窗口尺寸调整完成，共处理 {changed_count} 个窗口")
+        return True
 
     # -------------------------
     # 截图相关
@@ -928,13 +1040,118 @@ class GameBot:
     # 阶段函数：确定流程
     # =========================================================
 
-    def stage_start_challenge(self):
+    def stage_start_challenge(self, retry_depth=0, max_retry=5):
         self.log("执行阶段：开始挑战")
 
-        return self.click_template(
+        start_ok = self.click_template(
             "start_challenge.png",
             threshold=self.settings.THRESH_BUTTON,
             desc="开始挑战"
+        )
+
+        if start_ok:
+            self.log("开始挑战点击成功")
+            return True
+
+        self.log("没有点到 start_challenge.png，开始执行新增逻辑：检测胜利并尝试重新选将")
+        return self.handle_victory_to_new_challenge(
+            retry_depth=retry_depth,
+            max_retry=max_retry
+        )
+
+    def handle_victory_to_new_challenge(self, retry_depth=0, max_retry=5):
+        """
+        开始挑战按钮没点到时调用。
+
+        逻辑：
+        1. 检测 victory.png
+        2. 如果检测为真：
+           ① 检测并点击 cancel_2.png，等待 0.5s 后检测并点击 war.png
+           ② 检测并点击 add_hero.png
+           ③ 将 UI 最小化
+           ④ 点击 search.png
+           ⑤ 输入 hz + 空格 + 回车
+           ⑥ 等待 0.5s
+           ⑦ 检测并点击 select_hero.png
+           ⑧ 再次调用 stage_start_challenge()
+        """
+        if retry_depth >= max_retry:
+            self.log(f"胜利后重新开始流程达到最大重试次数 {max_retry}，停止递归")
+            return False
+
+        self.log("新增逻辑：开始检测胜利界面 victory.png")
+
+        if not self.stage_check_victory():
+            self.log("新增逻辑结束：没有检测到 victory.png")
+            return False
+
+        self.log("检测到 victory.png，开始执行胜利后重新选将流程")
+
+        if not self.click_template(
+            "cancel_2.png",
+            threshold=self.settings.THRESH_BUTTON,
+            desc="胜利界面-取消 cancel_2"
+        ):
+            self.log("胜利后重新选将失败：没有找到 cancel_2.png")
+            return False
+
+        time.sleep(0.5)
+
+        if not self.click_template(
+            "war.png",
+            threshold=self.settings.THRESH_BUTTON,
+            desc="征战 war"
+        ):
+            self.log("胜利后重新选将失败：没有找到 war.png")
+            return False
+
+        time.sleep(0.5)
+
+        if not self.click_template(
+            "add_hero.png",
+            threshold=self.settings.THRESH_BUTTON,
+            desc="添加武将 add_hero"
+        ):
+            self.log("胜利后重新选将失败：没有找到 add_hero.png")
+            return False
+
+        time.sleep(0.5)
+
+        self.log("准备最小化 UI，避免遮挡 search.png")
+        self.minimize_ui_window()
+
+        time.sleep(0.5)
+
+        if not self.click_template(
+            "search.png",
+            threshold=self.settings.THRESH_BUTTON,
+            desc="搜索框 search"
+        ):
+            self.log("胜利后重新选将失败：没有找到 search.png")
+            return False
+
+        time.sleep(0.3)
+
+        self.log("搜索框输入：hz + 空格 + 回车")
+        pyautogui.write("shenhuangzhong ", interval=0.03)
+        pyautogui.press("enter")
+
+        time.sleep(0.5)
+
+        if not self.click_template(
+            "select_hero.png",
+            threshold=self.settings.THRESH_BUTTON,
+            desc="选择武将 select_hero"
+        ):
+            self.log("胜利后重新选将失败：没有找到 select_hero.png")
+            return False
+
+        time.sleep(0.8)
+
+        self.log("胜利后重新选将流程完成，重新调用开始挑战")
+        return self.stage_start_challenge(
+            retry_depth=retry_depth + 1,
+            max_retry=max_retry
         )
 
     def stage_check_victory(self):
@@ -1401,6 +1618,14 @@ class GameBot:
 
         self.stop_flag = False
         self.running = True
+
+        # 所有流程第一步：统一调整所有浏览器窗口尺寸
+        self.resize_all_browser_windows(width=1280, height=800, move_to_left_top=True)
+
+        # 等待窗口尺寸和页面重绘稳定，否则后续模板匹配可能对不上
+        if not self.sleep_with_pause(1.0):
+            self.running = False
+            return
 
         game_id = 0
 

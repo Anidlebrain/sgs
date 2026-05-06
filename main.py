@@ -25,7 +25,8 @@ class BotUI:
         self.settings = BotSettings()
         self.bot = GameBot(
             log_func=self.write_log,
-            settings=self.settings
+            settings=self.settings,
+            minimize_func=self.minimize_ui
         )
 
         self.setup_style()
@@ -540,6 +541,17 @@ class BotUI:
     # =========================================================
     # UI 工具函数
     # =========================================================
+
+    def minimize_ui(self):
+        """
+        给 bot_core 调用，用于把主 UI 最小化。
+        因为 tkinter 不建议在子线程直接操作窗口，所以这里使用 root.after。
+        """
+        try:
+            self.root.after(0, self.root.iconify)
+            self.write_log("[UI] 主窗口已最小化")
+        except Exception as e:
+            self.write_log(f"[UI] 最小化失败：{e}")
 
     def write_log(self, text):
         self.log_text.insert("end", text + "\n")
