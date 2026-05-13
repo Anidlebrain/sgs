@@ -1,6 +1,7 @@
 import time
 import random
 import threading
+import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from datetime import datetime
@@ -26,6 +27,7 @@ else:
 TEMPLATE_DIR = BASE_DIR / "templates"
 DEBUG_DIR = BASE_DIR / "debug_screens"
 LEARNED_TEMPLATE_DIR = BASE_DIR / "learned_templates"
+SETTINGS_FILE = BASE_DIR / "settings.json"
 DEBUG_DIR.mkdir(exist_ok=True)
 LEARNED_TEMPLATE_DIR.mkdir(exist_ok=True)
 
@@ -125,6 +127,49 @@ THRESHOLD_META = [
 
 
 DEFAULT_SETTING_VALUES = asdict(BotSettings())
+
+
+def load_bot_settings():
+    if not SETTINGS_FILE.exists():
+        return BotSettings(), False, None
+
+    try:
+        with SETTINGS_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return BotSettings(), False, f"读取设置失败：{e}"
+
+    if not isinstance(data, dict):
+        return BotSettings(), False, "设置文件格式错误"
+
+    values = DEFAULT_SETTING_VALUES.copy()
+
+    for name, default_value in DEFAULT_SETTING_VALUES.items():
+        if name not in data:
+            continue
+
+        value = data[name]
+
+        try:
+            if isinstance(default_value, bool):
+                values[name] = bool(value)
+            else:
+                values[name] = float(value)
+        except (TypeError, ValueError):
+            return BotSettings(), False, f"设置项 {name} 不是有效数值"
+
+    return BotSettings(**values), True, None
+
+
+def save_bot_settings(settings):
+    try:
+        with SETTINGS_FILE.open("w", encoding="utf-8") as f:
+            json.dump(asdict(settings), f, ensure_ascii=False, indent=2)
+            f.write("\n")
+    except Exception as e:
+        return False, f"保存设置失败：{e}"
+
+    return True, None
 
 
 # =========================================================

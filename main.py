@@ -13,6 +13,9 @@ from bot_core import (
     BotSettings,
     THRESHOLD_META,
     DEFAULT_SETTING_VALUES,
+    SETTINGS_FILE,
+    load_bot_settings,
+    save_bot_settings,
 )
 
 
@@ -28,7 +31,7 @@ class BotUI:
 
         self.root.attributes("-topmost", True)
 
-        self.settings = BotSettings()
+        self.settings, self.settings_loaded, self.settings_load_error = load_bot_settings()
         self.bot = GameBot(
             log_func=self.write_log,
             settings=self.settings,
@@ -38,6 +41,11 @@ class BotUI:
 
         self.setup_style()
         self.build_ui()
+
+        if self.settings_loaded:
+            self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}")
+        elif self.settings_load_error:
+            self.write_log(f"[设置] {self.settings_load_error}，已使用默认阈值")
 
     # =========================================================
     # 样式
@@ -564,10 +572,22 @@ class BotUI:
             self.settings.SUPERVISION_ENABLED = supervision_enabled_var.get()
             self.settings.SUPERVISION_MIN_CONF = supervision_min_value
 
-            self.write_log("[设置] 阈值已更新")
+            saved, save_error = save_bot_settings(self.settings)
+
+            if saved:
+                self.write_log(f"[设置] 阈值已更新并保存：{SETTINGS_FILE}")
+            else:
+                self.write_log(f"[设置] 阈值已更新，但{save_error}")
+                messagebox.showwarning(
+                    "阈值保存失败",
+                    f"阈值已在本次运行中生效，但没有写入本地文件。\n{save_error}",
+                    parent=win
+                )
+                return
+
             messagebox.showinfo(
                 "阈值设置",
-                "阈值已更新，后续识别会使用新数值。",
+                "阈值已更新并保存，后续启动会自动读取。",
                 parent=win
             )
 
