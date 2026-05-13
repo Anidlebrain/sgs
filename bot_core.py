@@ -60,6 +60,10 @@ class BotSettings:
     SUPERVISION_ENABLED: bool = True
     SUPERVISION_MIN_CONF: float = 0.50
 
+    GAME_REGION_WIDTH: int = 1280
+    GAME_REGION_HEIGHT: int = 800
+    GAME_REGION_PADDING: int = 60
+
     BODY_HEAD_REL_X: float = 0.50
     BODY_HEAD_REL_Y: float = 0.18
 
@@ -190,6 +194,8 @@ class GameBot:
         self.click_lock = threading.Lock()
         self.supervision_lock = threading.Lock()
         self.supervision_denied_until = {}
+        self.last_match_sources = {}
+        self.popup_reject_until = {}
 
         self.increase_damage_last_click_time = 0
         self.xiaorui_last_click_time = 0
@@ -464,12 +470,55 @@ class GameBot:
     # 模板匹配
     # -------------------------
 
-    def _search_area(self, screen, region):
-        if region is not None:
-            x, y, w, h = region
-            return screen[y:y + h, x:x + w], x, y
+    def game_search_region(self, screen=None):
+        if screen is not None:
+            screen_h, screen_w = screen.shape[:2]
+        else:
+            try:
+                screen_w, screen_h = pyautogui.size()
+            except Exception:
+                return None
 
-        return screen, 0, 0
+        game_w = int(getattr(self.settings, "GAME_REGION_WIDTH", 1280))
+        game_h = int(getattr(self.settings, "GAME_REGION_HEIGHT", 800))
+        padding = int(getattr(self.settings, "GAME_REGION_PADDING", 60))
+
+        max_x = min(screen_w, game_w + padding)
+        max_y = min(screen_h, game_h + padding)
+
+        if max_x <= 0 or max_y <= 0:
+            return None
+
+        return 0, 0, max_x, max_y
+
+    def intersect_regions(self, region_a, region_b):
+        if region_a is None:
+            return region_b
+
+        if region_b is None:
+            return region_a
+
+        ax, ay, aw, ah = region_a
+        bx, by, bw, bh = region_b
+        x1 = max(int(ax), int(bx))
+        y1 = max(int(ay), int(by))
+        x2 = min(int(ax + aw), int(bx + bw))
+        y2 = min(int(ay + ah), int(by + bh))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        return x1, y1, x2 - x1, y2 - y1
+
+    def _search_area(self, screen, region):
+        game_region = self.game_search_region(screen)
+        search_region = self.intersect_regions(region, game_region)
+
+        if search_region is None:
+            return screen[0:0, 0:0], 0, 0
+
+        x, y, w, h = search_region
+        return screen[y:y + h, x:x + w], x, y
 
     def _match_one_template(self, screen, search_img, offset_x, offset_y, variant):
         template = variant["image"]
@@ -535,6 +584,131 @@ class GameBot:
 
     def _match_to_rect(self, match):
         return match["x"], match["y"], match["w"], match["h"], match["conf"]
+
+    def _remember_template_match(self, template_name, match):
+        if match is None:
+            return
+
+        variant = match.get("variant") or {}
+        path = variant.get("path")
+
+        self.last_match_sources[template_name] = {
+            "label": variant.get("label", template_name),
+            "path": str(path) if path is not None else "",
+            "x": match["x"],
+            "y": match["y"],
+            "w": match["w"],
+            "h": match["h"],
+            "conf": match["conf"],
+        }
+
+    def get_last_match_source_text(self, template_name):
+        source = self.last_match_sources.get(template_name)
+
+        if not source:
+            return "来源=未知"
+
+        label = source.get("label") or template_name
+        path = source.get("path") or ""
+
+        if path:
+            return f"来源={label} ({path})"
+
+        return f"来源={label}"
+
+    def is_top_right_click(self, x, y):
+        try:
+            screen_w, screen_h = pyautogui.size()
+        except Exception:
+            return False
+
+        return x >= screen_w * 0.75 and y <= screen_h * 0.25
+
+    def log_if_top_right_click(self, desc, x, y, conf=None, source_text=None):
+        if not self.is_top_right_click(x, y):
+            return
+
+        parts = [
+            f"可疑点击：{desc}",
+            f"坐标=({x}, {y})",
+        ]
+
+        if conf is not None:
+            parts.append(f"置信度={conf:.3f}")
+
+        if source_text:
+            parts.append(source_text)
+
+        parts.append("位置在屏幕右上区域")
+        self.log(" | ".join(parts))
+
+    def region_around_point(self, x, y, left=420, top=90, right=420, bottom=320):
+        try:
+            screen_w, screen_h = pyautogui.size()
+        except Exception:
+            return None
+
+        x1 = max(0, int(x - left))
+        y1 = max(0, int(y - top))
+        x2 = min(screen_w, int(x + right))
+        y2 = min(screen_h, int(y + bottom))
+
+        if x2 <= x1 or y2 <= y1:
+            return None
+
+        region = x1, y1, x2 - x1, y2 - y1
+        return self.intersect_regions(region, self.game_search_region())
+
+    def popup_confirm_region(self, popup_x, popup_y):
+        return self.region_around_point(
+            popup_x,
+            popup_y,
+            left=420,
+            top=80,
+            right=420,
+            bottom=360
+        )
+
+    def skill_popup_search_region(self):
+        try:
+            screen_w, screen_h = pyautogui.size()
+        except Exception:
+            return None
+
+        # 完整流程会把游戏浏览器固定到左上角 1280x800。
+        # 技能提示弹窗在游戏区域中下部，限制范围可避开浏览器/桌面右上角误匹配。
+        game_w = min(screen_w, int(getattr(self.settings, "GAME_REGION_WIDTH", 1280)))
+        game_h = min(screen_h, int(getattr(self.settings, "GAME_REGION_HEIGHT", 800)))
+        top = int(game_h * 0.32)
+        height = game_h - top
+
+        if game_w <= 0 or height <= 0:
+            return None
+
+        region = 0, top, game_w, height
+        return self.intersect_regions(region, self.game_search_region())
+
+    def should_skip_rejected_popup(self, template_name, x, y):
+        rejected = self.popup_reject_until.get(template_name)
+
+        if not rejected:
+            return False
+
+        rejected_x, rejected_y, until_time = rejected
+
+        if time.time() >= until_time:
+            self.popup_reject_until.pop(template_name, None)
+            return False
+
+        distance = ((x - rejected_x) ** 2 + (y - rejected_y) ** 2) ** 0.5
+        return distance < 80
+
+    def reject_popup_candidate(self, template_name, x, y, seconds=3.0):
+        self.popup_reject_until[template_name] = (x, y, time.time() + seconds)
+        self.log(
+            f"忽略疑似误识别弹窗：{template_name} | "
+            f"坐标=({x}, {y}) | {seconds:.1f} 秒内不再处理附近候选"
+        )
 
     def _maybe_accept_supervised_match(self, template_name, threshold, match):
         if match is None:
@@ -627,6 +801,8 @@ class GameBot:
         if not self._maybe_accept_supervised_match(template_name, threshold, match):
             return None
 
+        self._remember_template_match(template_name, match)
+
         center_x = match["x"] + match["w"] // 2
         center_y = match["y"] + match["h"] // 2
 
@@ -645,6 +821,8 @@ class GameBot:
                 f"最高置信度={max_conf:.3f} | 阈值={threshold:.3f}"
             )
             return None
+
+        self._remember_template_match(template_name, match)
 
         return self._match_to_rect(match)
 
@@ -693,6 +871,7 @@ class GameBot:
                 candidates.append((cx, cy, float(conf)))
 
         if not candidates and self._maybe_accept_supervised_match(template_name, threshold, best):
+            self._remember_template_match(template_name, best)
             cx = best["x"] + best["w"] // 2
             cy = best["y"] + best["h"] // 2
             candidates.append((cx, cy, best["conf"]))
@@ -805,11 +984,13 @@ class GameBot:
             return False
 
         x, y, conf = found
+        source_text = self.get_last_match_source_text(template_name)
 
         self.log(
             f"找到并点击：{desc or template_name} | "
-            f"置信度={conf:.3f} | 坐标=({x}, {y})"
+            f"置信度={conf:.3f} | 坐标=({x}, {y}) | {source_text}"
         )
+        self.log_if_top_right_click(desc or template_name, x, y, conf, source_text)
 
         self.safe_click(x, y)
         return True
@@ -835,9 +1016,10 @@ class GameBot:
 
             if found is not None:
                 x, y, conf = found
+                source_text = self.get_last_match_source_text(template_name)
                 self.log(
                     f"已出现：{desc or template_name} | "
-                    f"置信度={conf:.3f} | 坐标=({x}, {y})"
+                    f"置信度={conf:.3f} | 坐标=({x}, {y}) | {source_text}"
                 )
                 return found
 
@@ -853,8 +1035,10 @@ class GameBot:
             return False
 
         x, y, conf = found
+        source_text = self.get_last_match_source_text(template_name)
+        self.log_if_top_right_click(desc or template_name, x, y, conf, source_text)
         self.safe_click(x, y)
-        self.log(f"等待后点击：{desc or template_name}")
+        self.log(f"等待后点击：{desc or template_name} | 坐标=({x}, {y}) | {source_text}")
         return True
 
     # -------------------------
@@ -898,20 +1082,32 @@ class GameBot:
         if now - self.increase_damage_last_click_time < 0.8:
             return False
 
+        popup_region = self.skill_popup_search_region()
         found = self.find_template_quiet(
             "increase_damage.png",
-            threshold=self.settings.THRESH_POPUP
+            threshold=self.settings.THRESH_POPUP,
+            region=popup_region
         )
 
         if found is None:
             return False
 
         x, y, conf = found
-        self.log(f"检测到 increase_damage.png | 置信度={conf:.3f}")
+
+        if self.should_skip_rejected_popup("increase_damage.png", x, y):
+            return False
+
+        confirm_region = self.popup_confirm_region(x, y)
+        self.log(
+            f"检测到 increase_damage.png | 置信度={conf:.3f} | "
+            f"坐标=({x}, {y}) | 弹窗搜索区域={popup_region} | "
+            f"确认按钮搜索区域={confirm_region}"
+        )
 
         ok = self.click_template(
             "confirm.png",
-            threshold=self.settings.THRESH_CONFIRM,
+            threshold=max(self.settings.THRESH_CONFIRM, 0.60),
+            region=confirm_region,
             desc="increase_damage-确定"
         )
 
@@ -921,6 +1117,7 @@ class GameBot:
             return True
 
         self.log("检测到 increase_damage，但没有找到 confirm.png")
+        self.reject_popup_candidate("increase_damage.png", x, y)
         return False
 
     def handle_xiaorui(self):
@@ -929,20 +1126,32 @@ class GameBot:
         if now - self.xiaorui_last_click_time < 0.8:
             return False
 
+        popup_region = self.skill_popup_search_region()
         found = self.find_template_quiet(
             "xiaorui.png",
-            threshold=self.settings.THRESH_POPUP
+            threshold=self.settings.THRESH_POPUP,
+            region=popup_region
         )
 
         if found is None:
             return False
 
         x, y, conf = found
-        self.log(f"检测到 xiaorui.png | 置信度={conf:.3f}")
+
+        if self.should_skip_rejected_popup("xiaorui.png", x, y):
+            return False
+
+        confirm_region = self.popup_confirm_region(x, y)
+        self.log(
+            f"检测到 xiaorui.png | 置信度={conf:.3f} | "
+            f"坐标=({x}, {y}) | 弹窗搜索区域={popup_region} | "
+            f"确认按钮搜索区域={confirm_region}"
+        )
 
         ok = self.click_template(
             "confirm.png",
-            threshold=self.settings.THRESH_CONFIRM,
+            threshold=max(self.settings.THRESH_CONFIRM, 0.60),
+            region=confirm_region,
             desc="xiaorui-确定"
         )
 
@@ -952,6 +1161,7 @@ class GameBot:
             return True
 
         self.log("检测到 xiaorui，但没有找到 confirm.png")
+        self.reject_popup_candidate("xiaorui.png", x, y)
         return False
 
     def handle_save_by_cancel(self):
@@ -1114,11 +1324,13 @@ class GameBot:
         )
 
         self.log(f"先点击头部位置=({head_x}, {head_y})")
+        self.log_if_top_right_click("head.png-头部位置", head_x, head_y, conf)
         self.safe_click(head_x, head_y, jitter=2)
 
         time.sleep(0.4)
 
         self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
+        self.log_if_top_right_click("head.png-胸部位置", chest_x, chest_y, conf)
         self.safe_click(chest_x, chest_y, jitter=2)
 
         return "handled"
@@ -1166,11 +1378,13 @@ class GameBot:
                 )
 
                 self.log(f"先点击头部位置=({head_x}, {head_y})")
+                self.log_if_top_right_click("出杀后 head.png-头部位置", head_x, head_y, conf)
                 self.safe_click(head_x, head_y, jitter=2)
 
                 time.sleep(0.4)
 
                 self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
+                self.log_if_top_right_click("出杀后 head.png-胸部位置", chest_x, chest_y, conf)
                 self.safe_click(chest_x, chest_y, jitter=2)
 
                 return "handled"
