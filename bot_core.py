@@ -25,7 +25,9 @@ else:
 
 TEMPLATE_DIR = BASE_DIR / "templates"
 DEBUG_DIR = BASE_DIR / "debug_screens"
+LEARNED_TEMPLATE_DIR = BASE_DIR / "learned_templates"
 DEBUG_DIR.mkdir(exist_ok=True)
+LEARNED_TEMPLATE_DIR.mkdir(exist_ok=True)
 
 pyautogui.FAILSAFE = True
 
@@ -52,6 +54,9 @@ class BotSettings:
 
     THRESH_POPUP: float = 0.55
     THRESH_CONFIRM: float = 0.55
+
+    SUPERVISION_ENABLED: bool = True
+    SUPERVISION_MIN_CONF: float = 0.50
 
     BODY_HEAD_REL_X: float = 0.50
     BODY_HEAD_REL_Y: float = 0.18
@@ -127,16 +132,19 @@ DEFAULT_SETTING_VALUES = asdict(BotSettings())
 # =========================================================
 
 class GameBot:
-    def __init__(self, log_func=None, settings=None, minimize_func=None):
+    def __init__(self, log_func=None, settings=None, minimize_func=None, supervision_func=None):
         self.log_func = log_func or print
         self.settings = settings or BotSettings()
         self.minimize_func = minimize_func
+        self.supervision_func = supervision_func
 
         self.running = False
         self.paused = False
         self.stop_flag = False
 
         self.click_lock = threading.Lock()
+        self.supervision_lock = threading.Lock()
+        self.supervision_denied_until = {}
 
         self.increase_damage_last_click_time = 0
         self.xiaorui_last_click_time = 0
@@ -327,29 +335,231 @@ class GameBot:
     # 模板读取
     # -------------------------
 
-    def load_template(self, template_name):
-        path = TEMPLATE_DIR / template_name
-
+    def _load_image_file(self, path, log_missing=False):
         if not path.exists():
-            self.log(f"模板不存在：{path}")
+            if log_missing:
+                self.log(f"模板不存在：{path}")
             return None
 
         try:
             data = np.fromfile(str(path), dtype=np.uint8)
-            tpl = cv2.imdecode(data, cv2.IMREAD_COLOR)
+            img = cv2.imdecode(data, cv2.IMREAD_COLOR)
         except Exception as e:
             self.log(f"模板读取异常：{path} | {e}")
             return None
 
-        if tpl is None:
+        if img is None:
             self.log(f"模板读取失败：{path}")
             return None
 
-        return tpl
+        return img
+
+    def load_template(self, template_name):
+        path = TEMPLATE_DIR / template_name
+
+        return self._load_image_file(path, log_missing=True)
+
+    def learned_template_dir(self, template_name):
+        return LEARNED_TEMPLATE_DIR / Path(template_name).stem
+
+    def load_template_variants(self, template_name):
+        variants = []
+
+        base_path = TEMPLATE_DIR / template_name
+        base_template = self._load_image_file(base_path, log_missing=True)
+
+        if base_template is not None:
+            variants.append({
+                "label": template_name,
+                "path": base_path,
+                "image": base_template,
+            })
+
+        learned_dir = self.learned_template_dir(template_name)
+
+        if learned_dir.exists():
+            for path in sorted(learned_dir.glob("*.png")):
+                learned_template = self._load_image_file(path)
+
+                if learned_template is None:
+                    continue
+
+                variants.append({
+                    "label": f"{template_name} / {path.name}",
+                    "path": path,
+                    "image": learned_template,
+                })
+
+        return variants
+
+    def save_learned_template(self, template_name, image):
+        learned_dir = self.learned_template_dir(template_name)
+        learned_dir.mkdir(parents=True, exist_ok=True)
+
+        stem = Path(template_name).stem
+        filename = f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        path = learned_dir / filename
+
+        try:
+            image = np.ascontiguousarray(image)
+            success, encoded_img = cv2.imencode(".png", image)
+
+            if success:
+                encoded_img.tofile(str(path))
+                return path
+
+            self.log(f"学习模板编码失败：{path}")
+            return None
+
+        except Exception as e:
+            self.log(f"保存学习模板异常：{e}")
+            return None
 
     # -------------------------
     # 模板匹配
     # -------------------------
+
+    def _search_area(self, screen, region):
+        if region is not None:
+            x, y, w, h = region
+            return screen[y:y + h, x:x + w], x, y
+
+        return screen, 0, 0
+
+    def _match_one_template(self, screen, search_img, offset_x, offset_y, variant):
+        template = variant["image"]
+        th, tw = template.shape[:2]
+        sh, sw = search_img.shape[:2]
+
+        if sh < th or sw < tw:
+            return None
+
+        result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(result)
+
+        if not np.isfinite(max_val):
+            return None
+
+        top_left_x = offset_x + max_loc[0]
+        top_left_y = offset_y + max_loc[1]
+        crop = screen[top_left_y:top_left_y + th, top_left_x:top_left_x + tw]
+
+        return {
+            "x": top_left_x,
+            "y": top_left_y,
+            "w": tw,
+            "h": th,
+            "conf": float(max_val),
+            "variant": variant,
+            "crop": crop.copy(),
+            "result": result,
+        }
+
+    def _best_template_match(self, template_name, region=None, screen=None):
+        if screen is None:
+            screen = self.screenshot_bgr()
+
+        variants = self.load_template_variants(template_name)
+
+        if not variants:
+            return None
+
+        search_img, offset_x, offset_y = self._search_area(screen, region)
+
+        if search_img.size == 0:
+            return None
+
+        best = None
+
+        for variant in variants:
+            match = self._match_one_template(
+                screen,
+                search_img,
+                offset_x,
+                offset_y,
+                variant
+            )
+
+            if match is None:
+                continue
+
+            if best is None or match["conf"] > best["conf"]:
+                best = match
+
+        return best
+
+    def _match_to_rect(self, match):
+        return match["x"], match["y"], match["w"], match["h"], match["conf"]
+
+    def _maybe_accept_supervised_match(self, template_name, threshold, match):
+        if match is None:
+            return False
+
+        if match["conf"] >= threshold:
+            return True
+
+        if not getattr(self.settings, "SUPERVISION_ENABLED", True):
+            return False
+
+        if self.supervision_func is None:
+            return False
+
+        min_conf = getattr(self.settings, "SUPERVISION_MIN_CONF", 0.50)
+
+        if match["conf"] < min_conf:
+            return False
+
+        now = time.time()
+
+        with self.supervision_lock:
+            denied_until = self.supervision_denied_until.get(template_name, 0)
+
+            if denied_until > now:
+                return False
+
+        crop = match.get("crop")
+
+        if crop is None or crop.size == 0:
+            return False
+
+        try:
+            accepted = self.supervision_func(
+                template_name=template_name,
+                confidence=match["conf"],
+                threshold=threshold,
+                image=crop.copy(),
+            )
+        except Exception as e:
+            self.log(f"人工监督弹窗异常：{template_name} | {e}")
+            return False
+
+        if accepted:
+            path = self.save_learned_template(template_name, crop)
+
+            if path is not None:
+                self.log(
+                    f"人工确认通过：{template_name} | "
+                    f"置信度={match['conf']:.3f} | 已保存学习模板：{path}"
+                )
+            else:
+                self.log(
+                    f"人工确认通过：{template_name} | "
+                    f"置信度={match['conf']:.3f} | 学习模板保存失败"
+                )
+
+            with self.supervision_lock:
+                self.supervision_denied_until.pop(template_name, None)
+
+            return True
+
+        with self.supervision_lock:
+            self.supervision_denied_until[template_name] = time.time() + 6.0
+
+        self.log(
+            f"人工确认否定：{template_name} | "
+            f"置信度={match['conf']:.3f} | 6 秒内不再询问此模板"
+        )
+        return False
 
     def find_template(self, template_name, threshold=None, region=None):
         if threshold is None:
@@ -367,104 +577,80 @@ class GameBot:
         if threshold is None:
             threshold = self.settings.DEFAULT_THRESHOLD
 
-        screen = self.screenshot_bgr()
-        template = self.load_template(template_name)
+        match = self._best_template_match(template_name, region)
 
-        if template is None:
+        if not self._maybe_accept_supervised_match(template_name, threshold, match):
             return None
 
-        if region is not None:
-            x, y, w, h = region
-            search_img = screen[y:y + h, x:x + w]
-            offset_x, offset_y = x, y
-        else:
-            search_img = screen
-            offset_x, offset_y = 0, 0
+        center_x = match["x"] + match["w"] // 2
+        center_y = match["y"] + match["h"] // 2
 
-        if search_img.size == 0:
-            return None
-
-        result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-
-        if max_val < threshold:
-            return None
-
-        th, tw = template.shape[:2]
-        center_x = offset_x + max_loc[0] + tw // 2
-        center_y = offset_y + max_loc[1] + th // 2
-
-        return center_x, center_y, max_val
+        return center_x, center_y, match["conf"]
 
     def find_template_rect(self, template_name, threshold=None, region=None):
         if threshold is None:
             threshold = self.settings.DEFAULT_THRESHOLD
 
-        screen = self.screenshot_bgr()
-        template = self.load_template(template_name)
+        match = self._best_template_match(template_name, region)
 
-        if template is None:
-            return None
-
-        if region is not None:
-            x, y, w, h = region
-            search_img = screen[y:y + h, x:x + w]
-            offset_x, offset_y = x, y
-        else:
-            search_img = screen
-            offset_x, offset_y = 0, 0
-
-        if search_img.size == 0:
-            return None
-
-        result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
-        _, max_val, _, max_loc = cv2.minMaxLoc(result)
-
-        if max_val < threshold:
+        if not self._maybe_accept_supervised_match(template_name, threshold, match):
+            max_conf = 0.0 if match is None else match["conf"]
             self.log(
                 f"匹配不足：{template_name} | "
-                f"最高置信度={max_val:.3f} | 阈值={threshold:.3f}"
+                f"最高置信度={max_conf:.3f} | 阈值={threshold:.3f}"
             )
             return None
 
-        th, tw = template.shape[:2]
-        top_left_x = offset_x + max_loc[0]
-        top_left_y = offset_y + max_loc[1]
-
-        return top_left_x, top_left_y, tw, th, max_val
+        return self._match_to_rect(match)
 
     def find_all_templates(self, template_name, threshold=None, region=None, min_distance=20):
         if threshold is None:
             threshold = self.settings.DEFAULT_THRESHOLD
 
         screen = self.screenshot_bgr()
-        template = self.load_template(template_name)
+        variants = self.load_template_variants(template_name)
 
-        if template is None:
+        if not variants:
             return []
 
-        if region is not None:
-            x, y, w, h = region
-            search_img = screen[y:y + h, x:x + w]
-            offset_x, offset_y = x, y
-        else:
-            search_img = screen
-            offset_x, offset_y = 0, 0
+        search_img, offset_x, offset_y = self._search_area(screen, region)
 
         if search_img.size == 0:
             return []
 
-        result = cv2.matchTemplate(search_img, template, cv2.TM_CCOEFF_NORMED)
-        ys, xs = np.where(result >= threshold)
-
-        th, tw = template.shape[:2]
         candidates = []
+        best = None
 
-        for x, y in zip(xs, ys):
-            conf = result[y, x]
-            cx = offset_x + x + tw // 2
-            cy = offset_y + y + th // 2
-            candidates.append((cx, cy, float(conf)))
+        for variant in variants:
+            match = self._match_one_template(
+                screen,
+                search_img,
+                offset_x,
+                offset_y,
+                variant
+            )
+
+            if match is None:
+                continue
+
+            if best is None or match["conf"] > best["conf"]:
+                best = match
+
+            result = match["result"]
+            th = match["h"]
+            tw = match["w"]
+            ys, xs = np.where(result >= threshold)
+
+            for x, y in zip(xs, ys):
+                conf = result[y, x]
+                cx = offset_x + x + tw // 2
+                cy = offset_y + y + th // 2
+                candidates.append((cx, cy, float(conf)))
+
+        if not candidates and self._maybe_accept_supervised_match(template_name, threshold, best):
+            cx = best["x"] + best["w"] // 2
+            cy = best["y"] + best["h"] // 2
+            candidates.append((cx, cy, best["conf"]))
 
         candidates.sort(key=lambda item: item[2], reverse=True)
 

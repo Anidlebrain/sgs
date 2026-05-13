@@ -2,6 +2,12 @@ import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
 
+try:
+    from PIL import Image, ImageTk
+except Exception:
+    Image = None
+    ImageTk = None
+
 from bot_core import (
     GameBot,
     BotSettings,
@@ -26,7 +32,8 @@ class BotUI:
         self.bot = GameBot(
             log_func=self.write_log,
             settings=self.settings,
-            minimize_func=self.minimize_ui
+            minimize_func=self.minimize_ui,
+            supervision_func=self.confirm_template_supervision,
         )
 
         self.setup_style()
@@ -123,7 +130,7 @@ class BotUI:
 
         author = ttk.Label(
             title_frame,
-            text="By 莲莲の锋刃",
+            text="By 莲莲の锋刃\nBy Anidlebrain",
             style="Author.TLabel"
         )
         author.pack(side="right", padx=(0, 2), pady=(10, 0))
@@ -454,6 +461,58 @@ class BotUI:
             )
             sub.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
+        supervision_row = len(THRESHOLD_META)
+        supervision_enabled_var = tk.BooleanVar(value=self.settings.SUPERVISION_ENABLED)
+        supervision_min_var = tk.StringVar(value=f"{self.settings.SUPERVISION_MIN_CONF:.2f}")
+
+        supervision_frame = tk.Frame(panel, bg="#2b2118")
+        supervision_frame.grid(row=supervision_row, column=0, sticky="ew", padx=10, pady=(8, 3))
+
+        supervision_frame.columnconfigure(0, weight=1)
+        supervision_frame.columnconfigure(1, weight=0)
+
+        supervision_check = tk.Checkbutton(
+            supervision_frame,
+            text="启用人工监督学习",
+            variable=supervision_enabled_var,
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#2b2118",
+            fg="#ffe0a0",
+            selectcolor="#14100c",
+            activebackground="#2b2118",
+            activeforeground="#ffe0a0",
+            anchor="w"
+        )
+        supervision_check.grid(row=0, column=0, sticky="w")
+
+        supervision_spin = tk.Spinbox(
+            supervision_frame,
+            from_=0.00,
+            to=1.00,
+            increment=0.01,
+            textvariable=supervision_min_var,
+            width=7,
+            font=("Consolas", 9),
+            bg="#14100c",
+            fg="#f6e6bd",
+            insertbackground="#f6e6bd",
+            buttonbackground="#3a2a18",
+            relief="ridge"
+        )
+        supervision_spin.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        supervision_tip = tk.Label(
+            supervision_frame,
+            text="最高置信度低于目标阈值、但不低于此下限时弹窗确认；确认后会保存学习模板。",
+            font=("Microsoft YaHei", 7),
+            bg="#2b2118",
+            fg="#cdbb92",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        supervision_tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 0))
+
         # =====================================================
         # 底部按钮
         # =====================================================
@@ -463,6 +522,7 @@ class BotUI:
 
         def apply_thresholds():
             errors = []
+            parsed_values = {}
 
             for name, var in entry_vars.items():
                 text = var.get().strip()
@@ -477,7 +537,18 @@ class BotUI:
                     errors.append(f"{name} 必须在 0 到 1 之间")
                     continue
 
-                setattr(self.settings, name, value)
+                parsed_values[name] = value
+
+            supervision_min_text = supervision_min_var.get().strip()
+
+            try:
+                supervision_min_value = float(supervision_min_text)
+            except ValueError:
+                errors.append("SUPERVISION_MIN_CONF 不是有效数字")
+                supervision_min_value = None
+
+            if supervision_min_value is not None and not 0 <= supervision_min_value <= 1:
+                errors.append("SUPERVISION_MIN_CONF 必须在 0 到 1 之间")
 
             if errors:
                 messagebox.showerror(
@@ -486,6 +557,12 @@ class BotUI:
                     parent=win
                 )
                 return
+
+            for name, value in parsed_values.items():
+                setattr(self.settings, name, value)
+
+            self.settings.SUPERVISION_ENABLED = supervision_enabled_var.get()
+            self.settings.SUPERVISION_MIN_CONF = supervision_min_value
 
             self.write_log("[设置] 阈值已更新")
             messagebox.showinfo(
@@ -498,6 +575,9 @@ class BotUI:
             for name, value in DEFAULT_SETTING_VALUES.items():
                 if name in entry_vars:
                     entry_vars[name].set(f"{value:.2f}")
+
+            supervision_enabled_var.set(DEFAULT_SETTING_VALUES["SUPERVISION_ENABLED"])
+            supervision_min_var.set(f"{DEFAULT_SETTING_VALUES['SUPERVISION_MIN_CONF']:.2f}")
 
         apply_btn = tk.Button(
             button_frame,
@@ -552,6 +632,156 @@ class BotUI:
             self.write_log("[UI] 主窗口已最小化")
         except Exception as e:
             self.write_log(f"[UI] 最小化失败：{e}")
+
+    def confirm_template_supervision(self, template_name, confidence, threshold, image):
+        result = {"accepted": False}
+        done = threading.Event()
+
+        def ask_on_ui_thread():
+            try:
+                result["accepted"] = self.open_template_supervision_dialog(
+                    template_name,
+                    confidence,
+                    threshold,
+                    image
+                )
+            finally:
+                done.set()
+
+        if threading.current_thread() is threading.main_thread():
+            ask_on_ui_thread()
+        else:
+            self.root.after(0, ask_on_ui_thread)
+            done.wait()
+
+        return result["accepted"]
+
+    def open_template_supervision_dialog(self, template_name, confidence, threshold, image):
+        result = {"accepted": False}
+
+        try:
+            previous_state = self.root.state()
+        except Exception:
+            previous_state = "normal"
+
+        try:
+            if previous_state == "iconic":
+                self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            pass
+
+        win = tk.Toplevel(self.root)
+        win.title("人工确认")
+        win.geometry("420x430+980+258")
+        win.resizable(False, False)
+        win.attributes("-topmost", True)
+        win.configure(bg="#1f1a14")
+
+        title = tk.Label(
+            win,
+            text="是否确认这是当前模板？",
+            font=("Microsoft YaHei", 13, "bold"),
+            bg="#1f1a14",
+            fg="#ffd36b"
+        )
+        title.pack(pady=(12, 4))
+
+        info = tk.Label(
+            win,
+            text=(
+                f"模板：{template_name}\n"
+                f"当前置信度：{confidence:.3f}\n"
+                f"目标阈值：{threshold:.3f}"
+            ),
+            font=("Microsoft YaHei", 9),
+            bg="#1f1a14",
+            fg="#f6e6bd",
+            justify="left"
+        )
+        info.pack(fill="x", padx=16, pady=(0, 8))
+
+        preview_frame = tk.Frame(win, bg="#2b2118", bd=2, relief="ridge")
+        preview_frame.pack(fill="both", expand=True, padx=16, pady=(0, 10))
+
+        preview_added = False
+
+        if Image is not None and ImageTk is not None and image is not None:
+            try:
+                rgb_image = image[:, :, ::-1].copy()
+                preview = Image.fromarray(rgb_image)
+                preview.thumbnail((360, 235))
+                photo = ImageTk.PhotoImage(preview)
+
+                image_label = tk.Label(
+                    preview_frame,
+                    image=photo,
+                    bg="#2b2118"
+                )
+                image_label.image = photo
+                image_label.pack(expand=True)
+                preview_added = True
+            except Exception:
+                preview_added = False
+
+        if not preview_added:
+            tk.Label(
+                preview_frame,
+                text="预览不可用，但仍可根据当前游戏画面确认。",
+                font=("Microsoft YaHei", 9),
+                bg="#2b2118",
+                fg="#f6e6bd"
+            ).pack(expand=True)
+
+        button_frame = tk.Frame(win, bg="#1f1a14")
+        button_frame.pack(fill="x", padx=16, pady=(0, 14))
+
+        def choose(value):
+            result["accepted"] = value
+            win.destroy()
+
+        no_btn = tk.Button(
+            button_frame,
+            text="不是",
+            font=("Microsoft YaHei", 9),
+            bg="#5a4632",
+            fg="#f6e6bd",
+            activebackground="#73583c",
+            activeforeground="#ffffff",
+            relief="ridge",
+            command=lambda: choose(False)
+        )
+        no_btn.pack(side="left", fill="x", expand=True, padx=(0, 6))
+
+        yes_btn = tk.Button(
+            button_frame,
+            text="是，保存学习",
+            font=("Microsoft YaHei", 9, "bold"),
+            bg="#b8863b",
+            fg="white",
+            activebackground="#d7a85a",
+            activeforeground="white",
+            relief="ridge",
+            command=lambda: choose(True)
+        )
+        yes_btn.pack(side="left", fill="x", expand=True, padx=(6, 0))
+
+        win.protocol("WM_DELETE_WINDOW", lambda: choose(False))
+        win.bind("<Escape>", lambda event: choose(False))
+        win.grab_set()
+        yes_btn.focus_set()
+
+        self.write_log(
+            f"[人工监督] 等待确认：{template_name} | "
+            f"置信度={confidence:.3f} | 阈值={threshold:.3f}"
+        )
+
+        self.root.wait_window(win)
+
+        if previous_state == "iconic":
+            self.root.after(100, self.root.iconify)
+
+        return result["accepted"]
 
     def write_log(self, text):
         self.log_text.insert("end", text + "\n")
