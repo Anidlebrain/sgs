@@ -1,8 +1,6 @@
-import time
+﻿import time
 import random
 import threading
-import json
-from dataclasses import dataclass, asdict
 from pathlib import Path
 from datetime import datetime
 
@@ -10,182 +8,34 @@ import cv2
 import numpy as np
 import pyautogui
 
+from app_paths import DEBUG_DIR, LEARNED_TEMPLATE_DIR, TEMPLATE_DIR
+from profile_registry import resolve_general_profile, resolve_spirit_profile
+from settings_store import BotSettings
+from template_registry import get_template_display_name, get_template_meta
 
-# =========================================================
-# 基础路径
-# =========================================================
-
-import sys
-
-if getattr(sys, "frozen", False):
-    # 打包成 exe 后，BASE_DIR 指向 exe 所在文件夹
-    BASE_DIR = Path(sys.executable).parent
-else:
-    # 正常 python 运行时，BASE_DIR 指向当前 py 文件所在文件夹
-    BASE_DIR = Path(__file__).parent
-
-TEMPLATE_DIR = BASE_DIR / "templates"
-DEBUG_DIR = BASE_DIR / "debug_screens"
-LEARNED_TEMPLATE_DIR = BASE_DIR / "learned_templates"
-SETTINGS_FILE = BASE_DIR / "settings.json"
-DEBUG_DIR.mkdir(exist_ok=True)
-LEARNED_TEMPLATE_DIR.mkdir(exist_ok=True)
 
 pyautogui.FAILSAFE = True
-
-
-# =========================================================
-# 阈值配置
-# =========================================================
-
-@dataclass
-class BotSettings:
-    DEFAULT_THRESHOLD: float = 0.65
-    CLICK_SLEEP: float = 0.4
-
-    THRESH_BUTTON: float = 0.65
-    THRESH_SMALL: float = 0.65
-    THRESH_CARD: float = 0.65
-    THRESH_BOSS: float = 0.65
-    THRESH_HEAD: float = 0.65
-    THRESH_VICTORY: float = 0.65
-    THRESH_SAVE: float = 0.65
-
-    THRESH_ACQUIRE: float = 0.60
-    THRESH_REQUIRE: float = 0.75
-
-    THRESH_POPUP: float = 0.55
-    THRESH_CONFIRM: float = 0.55
-
-    SUPERVISION_ENABLED: bool = True
-    SUPERVISION_MIN_CONF: float = 0.50
-
-    GAME_REGION_WIDTH: int = 1280
-    GAME_REGION_HEIGHT: int = 800
-    GAME_REGION_PADDING: int = 60
-
-    BODY_HEAD_REL_X: float = 0.50
-    BODY_HEAD_REL_Y: float = 0.18
-
-    BODY_CHEST_REL_X: float = 0.50
-    BODY_CHEST_REL_Y: float = 0.31
-
-
-THRESHOLD_META = [
-    {
-        "name": "THRESH_BUTTON",
-        "title": "通用按钮阈值",
-        "desc": "用于开始挑战、取消、整理手牌等普通按钮。",
-    },
-    {
-        "name": "THRESH_SMALL",
-        "title": "小图标/提示阈值",
-        "desc": "用于 select_figure、select_figure_2 等较小提示图。",
-    },
-    {
-        "name": "THRESH_CARD",
-        "title": "手牌识别阈值",
-        "desc": "用于 attack.png，也就是【杀】的识别。",
-    },
-    {
-        "name": "THRESH_BOSS",
-        "title": "Boss头像阈值",
-        "desc": "用于 lijue.png，也就是李傕头像识别。",
-    },
-    {
-        "name": "THRESH_HEAD",
-        "title": "人体图阈值",
-        "desc": "用于 head.png，决定是否进入点击头部/胸部流程。",
-    },
-    {
-        "name": "THRESH_VICTORY",
-        "title": "胜利界面阈值",
-        "desc": "用于 victory.png，判断是否通关。",
-    },
-    {
-        "name": "THRESH_SAVE",
-        "title": "求桃阈值",
-        "desc": "用于 save.png，检测到后点击取消。",
-    },
-    {
-        "name": "THRESH_ACQUIRE",
-        "title": "武将技能阈值",
-        "desc": "用于 acquire.png，也就是【摸体力值张牌】。",
-    },
-    {
-        "name": "THRESH_REQUIRE",
-        "title": "将灵技能询问阈值",
-        "desc": "用于 require.png，也就是是否发动【缝甲】。",
-    },
-    {
-        "name": "THRESH_POPUP",
-        "title": "弹窗技能阈值",
-        "desc": "用于 increase_damage.png / xiaorui.png。",
-    },
-    {
-        "name": "THRESH_CONFIRM",
-        "title": "确认按钮阈值",
-        "desc": "用于 confirm.png，点确定时使用。",
-    },
-]
-
-
-DEFAULT_SETTING_VALUES = asdict(BotSettings())
-
-
-def load_bot_settings():
-    if not SETTINGS_FILE.exists():
-        return BotSettings(), False, None
-
-    try:
-        with SETTINGS_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception as e:
-        return BotSettings(), False, f"读取设置失败：{e}"
-
-    if not isinstance(data, dict):
-        return BotSettings(), False, "设置文件格式错误"
-
-    values = DEFAULT_SETTING_VALUES.copy()
-
-    for name, default_value in DEFAULT_SETTING_VALUES.items():
-        if name not in data:
-            continue
-
-        value = data[name]
-
-        try:
-            if isinstance(default_value, bool):
-                values[name] = bool(value)
-            else:
-                values[name] = float(value)
-        except (TypeError, ValueError):
-            return BotSettings(), False, f"设置项 {name} 不是有效数值"
-
-    return BotSettings(**values), True, None
-
-
-def save_bot_settings(settings):
-    try:
-        with SETTINGS_FILE.open("w", encoding="utf-8") as f:
-            json.dump(asdict(settings), f, ensure_ascii=False, indent=2)
-            f.write("\n")
-    except Exception as e:
-        return False, f"保存设置失败：{e}"
-
-    return True, None
-
 
 # =========================================================
 # 自动化核心类
 # =========================================================
 
 class GameBot:
-    def __init__(self, log_func=None, settings=None, minimize_func=None, supervision_func=None):
+    def __init__(
+        self,
+        log_func=None,
+        settings=None,
+        minimize_func=None,
+        supervision_func=None,
+        general_profile=None,
+        spirit_profile=None,
+    ):
         self.log_func = log_func or print
         self.settings = settings or BotSettings()
         self.minimize_func = minimize_func
         self.supervision_func = supervision_func
+        self.general_profile = resolve_general_profile(general_profile)
+        self.spirit_profile = resolve_spirit_profile(spirit_profile)
 
         self.running = False
         self.paused = False
@@ -405,30 +255,69 @@ class GameBot:
 
         return img
 
-    def load_template(self, template_name):
-        path = TEMPLATE_DIR / template_name
+    def template_candidate_paths(self, template_name):
+        meta = get_template_meta(template_name)
+        paths = [TEMPLATE_DIR / meta.path]
+        legacy_path = TEMPLATE_DIR / template_name
 
-        return self._load_image_file(path, log_missing=True)
+        if legacy_path not in paths:
+            paths.append(legacy_path)
+
+        return paths
+
+    def learned_template_dirs(self, template_name):
+        meta = get_template_meta(template_name)
+        dirs = [LEARNED_TEMPLATE_DIR / meta.learned_subdir]
+        legacy_dir = LEARNED_TEMPLATE_DIR / Path(template_name).stem
+
+        if legacy_dir not in dirs:
+            dirs.append(legacy_dir)
+
+        return dirs
+
+    def load_template(self, template_name):
+        for path in self.template_candidate_paths(template_name):
+            image = self._load_image_file(path)
+
+            if image is not None:
+                return image
+
+        paths_text = " 或 ".join(str(path) for path in self.template_candidate_paths(template_name))
+        self.log(f"模板不存在：{paths_text}")
+        return None
 
     def learned_template_dir(self, template_name):
-        return LEARNED_TEMPLATE_DIR / Path(template_name).stem
+        return self.learned_template_dirs(template_name)[0]
 
     def load_template_variants(self, template_name):
         variants = []
+        display_name = get_template_display_name(template_name)
 
-        base_path = TEMPLATE_DIR / template_name
-        base_template = self._load_image_file(base_path, log_missing=True)
+        for index, base_path in enumerate(self.template_candidate_paths(template_name)):
+            base_template = self._load_image_file(base_path)
 
-        if base_template is not None:
+            if base_template is None:
+                continue
+
+            label = display_name
+            if index > 0:
+                label = f"{display_name} / 旧路径"
+
             variants.append({
-                "label": template_name,
+                "label": label,
                 "path": base_path,
                 "image": base_template,
             })
+            break
 
-        learned_dir = self.learned_template_dir(template_name)
+        if not variants:
+            paths_text = " 或 ".join(str(path) for path in self.template_candidate_paths(template_name))
+            self.log(f"模板不存在：{paths_text}")
 
-        if learned_dir.exists():
+        for learned_dir in self.learned_template_dirs(template_name):
+            if not learned_dir.exists():
+                continue
+
             for path in sorted(learned_dir.glob("*.png")):
                 learned_template = self._load_image_file(path)
 
@@ -436,7 +325,7 @@ class GameBot:
                     continue
 
                 variants.append({
-                    "label": f"{template_name} / {path.name}",
+                    "label": f"{display_name} / 学习：{path.name}",
                     "path": path,
                     "image": learned_template,
                 })
@@ -447,8 +336,8 @@ class GameBot:
         learned_dir = self.learned_template_dir(template_name)
         learned_dir.mkdir(parents=True, exist_ok=True)
 
-        stem = Path(template_name).stem
-        filename = f"{stem}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
+        prefix = get_template_meta(template_name).learned_filename_prefix
+        filename = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png"
         path = learned_dir / filename
 
         try:
@@ -705,14 +594,17 @@ class GameBot:
 
     def reject_popup_candidate(self, template_name, x, y, seconds=3.0):
         self.popup_reject_until[template_name] = (x, y, time.time() + seconds)
+        display_name = get_template_display_name(template_name)
         self.log(
-            f"忽略疑似误识别弹窗：{template_name} | "
+            f"忽略疑似误识别弹窗：{display_name} | "
             f"坐标=({x}, {y}) | {seconds:.1f} 秒内不再处理附近候选"
         )
 
     def _maybe_accept_supervised_match(self, template_name, threshold, match):
         if match is None:
             return False
+
+        display_name = get_template_display_name(template_name)
 
         if match["conf"] >= threshold:
             return True
@@ -749,7 +641,7 @@ class GameBot:
                 image=crop.copy(),
             )
         except Exception as e:
-            self.log(f"人工监督弹窗异常：{template_name} | {e}")
+            self.log(f"人工监督弹窗异常：{display_name} | {e}")
             return False
 
         if accepted:
@@ -757,12 +649,12 @@ class GameBot:
 
             if path is not None:
                 self.log(
-                    f"人工确认通过：{template_name} | "
+                    f"人工确认通过：{display_name} | "
                     f"置信度={match['conf']:.3f} | 已保存学习模板：{path}"
                 )
             else:
                 self.log(
-                    f"人工确认通过：{template_name} | "
+                    f"人工确认通过：{display_name} | "
                     f"置信度={match['conf']:.3f} | 学习模板保存失败"
                 )
 
@@ -775,7 +667,7 @@ class GameBot:
             self.supervision_denied_until[template_name] = time.time() + 6.0
 
         self.log(
-            f"人工确认否定：{template_name} | "
+            f"人工确认否定：{display_name} | "
             f"置信度={match['conf']:.3f} | 6 秒内不再询问此模板"
         )
         return False
@@ -944,21 +836,24 @@ class GameBot:
         return None
 
     # -------------------------
-    # require.png 检测
+    # 将灵技能询问检测
     # -------------------------
 
     def detect_require_prompt(self):
+        template_name = self.spirit_profile.prompt_template
+        threshold = getattr(self.settings, self.spirit_profile.prompt_threshold_name)
+
         found = self.find_template(
-            "require.png",
-            threshold=self.settings.THRESH_REQUIRE
+            template_name,
+            threshold=threshold
         )
 
         if found is None:
-            self.log("没有检测到 require.png")
+            self.log(f"没有检测到 {template_name}")
             return False
 
         x, y, conf = found
-        self.log(f"检测到 require.png | 置信度={conf:.3f} | 坐标=({x}, {y})")
+        self.log(f"检测到 {template_name} | 置信度={conf:.3f} | 坐标=({x}, {y})")
         return True
 
     # -------------------------
@@ -1199,7 +1094,7 @@ class GameBot:
 
     def handle_missing_head_save_victory(self, context="未知阶段", victory_timeout=15):
         """
-        head.png 没检测到时调用。
+        当前武将部位模板没检测到时调用。
 
         逻辑：
         1. 检测 save.png
@@ -1208,7 +1103,9 @@ class GameBot:
         4. 检测到 victory.png 返回 "victory"
         5. 没检测到返回 "not_found"
         """
-        self.log(f"{context}：未检测到 head.png，开始检测 save.png")
+        target_template = self.general_profile.target_template or "武将部位模板"
+
+        self.log(f"{context}：未检测到 {target_template}，开始检测 save.png")
 
         save_handled = self.handle_save_by_cancel()
 
@@ -1272,13 +1169,21 @@ class GameBot:
         """
         将灵技能阶段使用。
 
-        如果检测到 head.png：
+        如果检测到当前武将部位模板：
             点击头部、胸部，返回 "handled"
 
-        如果没检测到 head.png：
+        如果没检测到当前武将部位模板：
             检测 save.png，点击 cancel.png，然后 15 秒内检测 victory.png。
         """
-        self.log("等待人体图 head.png 出现")
+        target_template = self.general_profile.target_template
+
+        if not target_template:
+            self.log(f"{self.general_profile.name} 无部位选择技能效果，跳过部位选择流程")
+            return "skipped"
+
+        target_threshold = getattr(self.settings, self.general_profile.target_threshold_name)
+
+        self.log(f"等待{self.general_profile.target_desc} {target_template} 出现")
 
         rect = None
         start = time.time()
@@ -1286,7 +1191,7 @@ class GameBot:
 
         while time.time() - start < timeout:
             if self.stop_flag:
-                self.log("收到停止信号，停止等待 head.png")
+                self.log(f"收到停止信号，停止等待 {target_template}")
                 return "stopped"
 
             if self.paused:
@@ -1294,8 +1199,8 @@ class GameBot:
                 continue
 
             rect = self.find_template_rect(
-                "head.png",
-                threshold=self.settings.THRESH_HEAD
+                target_template,
+                threshold=target_threshold
             )
 
             if rect is not None:
@@ -1304,7 +1209,7 @@ class GameBot:
             time.sleep(0.25)
 
         if rect is None:
-            self.log("未检测到人体图 head.png")
+            self.log(f"未检测到{self.general_profile.target_desc} {target_template}")
             return self.handle_missing_head_save_victory(
                 context="将灵技能阶段",
                 victory_timeout=15
@@ -1319,18 +1224,18 @@ class GameBot:
         chest_y = int(y + h * self.settings.BODY_CHEST_REL_Y)
 
         self.log(
-            f"检测到 head.png | 置信度={conf:.3f} | "
+            f"检测到 {target_template} | 置信度={conf:.3f} | "
             f"模板区域=({x}, {y}, {w}, {h})"
         )
 
         self.log(f"先点击头部位置=({head_x}, {head_y})")
-        self.log_if_top_right_click("head.png-头部位置", head_x, head_y, conf)
+        self.log_if_top_right_click(f"{target_template}-头部位置", head_x, head_y, conf)
         self.safe_click(head_x, head_y, jitter=2)
 
         time.sleep(0.4)
 
         self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
-        self.log_if_top_right_click("head.png-胸部位置", chest_x, chest_y, conf)
+        self.log_if_top_right_click(f"{target_template}-胸部位置", chest_x, chest_y, conf)
         self.safe_click(chest_x, chest_y, jitter=2)
 
         return "handled"
@@ -1339,19 +1244,27 @@ class GameBot:
         """
         出牌阶段出杀后使用。
 
-        如果检测到 head.png：
+        如果检测到当前武将部位模板：
             点击头部、胸部，返回 "handled"
 
-        如果没检测到 head.png：
+        如果没检测到当前武将部位模板：
             检测 save.png，点击 cancel.png，然后 15 秒内检测 victory.png。
         """
-        self.log(f"出杀后等待 head.png，最长 {timeout} 秒")
+        target_template = self.general_profile.target_template
+
+        if not target_template:
+            self.log(f"{self.general_profile.name} 无出杀后部位选择技能效果，跳过部位选择流程")
+            return "skipped"
+
+        target_threshold = getattr(self.settings, self.general_profile.target_threshold_name)
+
+        self.log(f"出杀后等待 {target_template}，最长 {timeout} 秒")
 
         start = time.time()
 
         while time.time() - start < timeout:
             if self.stop_flag:
-                self.log("收到停止信号，停止等待出杀后的 head.png")
+                self.log(f"收到停止信号，停止等待出杀后的 {target_template}")
                 return "stopped"
 
             if self.paused:
@@ -1359,8 +1272,8 @@ class GameBot:
                 continue
 
             rect = self.find_template_rect(
-                "head.png",
-                threshold=self.settings.THRESH_HEAD
+                target_template,
+                threshold=target_threshold
             )
 
             if rect is not None:
@@ -1373,25 +1286,25 @@ class GameBot:
                 chest_y = int(y + h * self.settings.BODY_CHEST_REL_Y)
 
                 self.log(
-                    f"出杀后检测到 head.png | 置信度={conf:.3f} | "
+                    f"出杀后检测到 {target_template} | 置信度={conf:.3f} | "
                     f"模板区域=({x}, {y}, {w}, {h})"
                 )
 
                 self.log(f"先点击头部位置=({head_x}, {head_y})")
-                self.log_if_top_right_click("出杀后 head.png-头部位置", head_x, head_y, conf)
+                self.log_if_top_right_click(f"出杀后 {target_template}-头部位置", head_x, head_y, conf)
                 self.safe_click(head_x, head_y, jitter=2)
 
                 time.sleep(0.4)
 
                 self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
-                self.log_if_top_right_click("出杀后 head.png-胸部位置", chest_x, chest_y, conf)
+                self.log_if_top_right_click(f"出杀后 {target_template}-胸部位置", chest_x, chest_y, conf)
                 self.safe_click(chest_x, chest_y, jitter=2)
 
                 return "handled"
 
             time.sleep(0.25)
 
-        self.log("出杀后没有检测到 head.png")
+        self.log(f"出杀后没有检测到 {target_template}")
         return self.handle_missing_head_save_victory(
             context="出牌阶段",
             victory_timeout=15
@@ -1432,12 +1345,15 @@ class GameBot:
 
         逻辑：
         1. 持续检测 cancel.png，有就点击。
-        2. 等待 acquire.png 出现。
-        3. 如果 timeout 秒内没等到 acquire.png，再额外检测一次 victory.png。
+        2. 等待当前武将的技能阶段模板出现。
+        3. 如果 timeout 秒内没等到武将技能模板，再额外检测一次 victory.png。
            - 有 victory.png：返回 victory，让完整流程进入下一局。
            - 没有 victory.png：返回 timeout。
         """
-        self.log(f"进入下一轮清理阶段：持续点击 cancel.png，直到 acquire.png 出现，最长 {timeout} 秒")
+        template_name = self.general_profile.skill_template
+        threshold = getattr(self.settings, self.general_profile.skill_threshold_name)
+
+        self.log(f"进入下一轮清理阶段：持续点击 cancel.png，直到 {template_name} 出现，最长 {timeout} 秒")
 
         start = time.time()
 
@@ -1451,13 +1367,13 @@ class GameBot:
                 continue
 
             acquire_found = self.find_template_quiet(
-                "acquire.png",
-                threshold=self.settings.THRESH_ACQUIRE
+                template_name,
+                threshold=threshold
             )
 
             if acquire_found is not None:
                 x, y, conf = acquire_found
-                self.log(f"检测到武将技能阶段 acquire.png | 置信度={conf:.3f}")
+                self.log(f"检测到武将技能阶段 {template_name} | 置信度={conf:.3f}")
                 return "next_turn"
 
             if self.handle_cancel_only():
@@ -1466,7 +1382,7 @@ class GameBot:
 
             time.sleep(0.3)
 
-        self.log(f"下一轮清理阶段超时：{timeout} 秒内未检测到 acquire.png，开始额外检测 victory.png")
+        self.log(f"下一轮清理阶段超时：{timeout} 秒内未检测到 {template_name}，开始额外检测 victory.png")
 
         victory_found = self.find_template_quiet(
             "victory.png",
@@ -1478,7 +1394,7 @@ class GameBot:
             self.log(f"超时后检测到 victory.png | 置信度={conf:.3f} | 判定本局胜利")
             return "victory"
 
-        self.log("下一轮清理阶段超时：未检测到 acquire.png，也未检测到 victory.png")
+        self.log(f"下一轮清理阶段超时：未检测到 {template_name}，也未检测到 victory.png")
         return "timeout"
 
     # =========================================================
@@ -1515,9 +1431,9 @@ class GameBot:
            ② 检测并点击 add_hero.png
            ③ 将 UI 最小化
            ④ 点击 search.png
-           ⑤ 输入 hz + 空格 + 回车
+           ⑤ 输入当前武将搜索词 + 回车
            ⑥ 等待 0.5s
-           ⑦ 检测并点击 select_hero.png
+           ⑦ 检测并点击当前武将的搜索结果模板
            ⑧ 再次调用 stage_start_challenge()
         """
         if retry_depth >= max_retry:
@@ -1577,18 +1493,20 @@ class GameBot:
 
         time.sleep(0.3)
 
-        self.log("搜索框输入：hz + 空格 + 回车")
-        pyautogui.write("shenhuangzhong ", interval=0.03)
+        self.log(f"搜索框输入：{self.general_profile.name}（{self.general_profile.search_text.strip()}）")
+        pyautogui.write(self.general_profile.search_text, interval=0.03)
         pyautogui.press("enter")
 
         time.sleep(0.5)
 
+        select_template = self.general_profile.select_template
+
         if not self.click_template(
-            "select_hero.png",
+            select_template,
             threshold=self.settings.THRESH_BUTTON,
-            desc="选择武将 select_hero"
+            desc=self.general_profile.select_desc
         ):
-            self.log("胜利后重新选将失败：没有找到 select_hero.png")
+            self.log(f"胜利后重新选将失败：没有找到 {select_template}")
             return False
 
         time.sleep(0.8)
@@ -1684,12 +1602,15 @@ class GameBot:
     # =========================================================
 
     def battle_phase_acquire_skill(self):
-        self.log("执行牌局阶段②：武将技能阶段")
+        template_name = self.general_profile.skill_template
+        threshold = getattr(self.settings, self.general_profile.skill_threshold_name)
+
+        self.log(f"执行牌局阶段②：武将技能阶段（{self.general_profile.name}）")
 
         return self.click_template(
-            "acquire.png",
-            threshold=self.settings.THRESH_ACQUIRE,
-            desc="摸体力值张牌"
+            template_name,
+            threshold=threshold,
+            desc=self.general_profile.skill_desc
         )
 
     # =========================================================
@@ -1697,15 +1618,18 @@ class GameBot:
     # =========================================================
 
     def battle_phase_repairing_skill(self):
-        self.log("执行牌局阶段③：将灵技能阶段 require")
+        template_name = self.spirit_profile.prompt_template
+        target_template = self.general_profile.target_template
+
+        self.log(f"执行牌局阶段③：将灵技能阶段（{self.spirit_profile.name}）")
 
         require_found = self.detect_require_prompt()
 
         if not require_found:
-            self.log("没有检测到 require.png，本阶段不需要操作")
+            self.log(f"没有检测到 {template_name}，本阶段不需要操作")
             return True
 
-        self.log("检测到 require.png，开始执行将灵技能流程")
+        self.log(f"检测到 {template_name}，开始执行将灵技能流程")
 
         if not self.wait_and_click_template(
             "confirm.png",
@@ -1753,24 +1677,29 @@ class GameBot:
         self.log("将灵技能：开始持续检测 increase_damage.png / xiaorui.png")
         self.handle_after_lijue_prompts(duration=3.0)
 
-        self.log("将灵技能：弹窗检测结束，休息 1 秒后等待 head.png")
+        if target_template:
+            self.log(f"将灵技能：弹窗检测结束，休息 1 秒后等待 {target_template}")
+        else:
+            self.log("将灵技能：当前武将无部位选择技能效果，休息 1 秒后跳过该流程")
         time.sleep(1.0)
 
         head_result = self.click_head_target()
 
-        if head_result == "handled":
+        if head_result in ("handled", "skipped"):
             self.log("将灵技能阶段完成")
             return True
 
         if head_result == "victory":
-            self.log("将灵技能阶段完成：未检测到 head.png，但通过 save.png 后检测到胜利")
+            show_template = target_template or "武将部位模板"
+            self.log(f"将灵技能阶段完成：未检测到 {show_template}，但通过 save.png 后检测到胜利")
             return "victory"
 
         if head_result == "stopped":
             self.log("将灵技能阶段中止")
             return False
 
-        self.log("将灵技能失败：未检测到 head.png，也没有通过 save.png 检测到胜利")
+        show_template = target_template or "武将部位模板"
+        self.log(f"将灵技能失败：未检测到 {show_template}，也没有通过 save.png 检测到胜利")
         return False
 
     # =========================================================
@@ -1778,6 +1707,8 @@ class GameBot:
     # =========================================================
 
     def battle_phase_attack(self):
+        target_template = self.general_profile.target_template
+
         self.log("执行牌局阶段④：出牌阶段")
 
         self.log("出牌阶段：第一次点击整理手牌")
@@ -1843,7 +1774,10 @@ class GameBot:
         self.log("出牌阶段：开始持续检测 increase_damage.png / xiaorui.png")
         self.handle_after_lijue_prompts(duration=3.0)
 
-        self.log("出牌阶段：弹窗检测结束，休息 1.5 秒后等待 head.png")
+        if target_template:
+            self.log(f"出牌阶段：弹窗检测结束，休息 1.5 秒后等待 {target_template}")
+        else:
+            self.log("出牌阶段：当前武将无部位选择技能效果，休息 1.5 秒后跳过该流程")
         time.sleep(1.5)
 
         head_result = self.wait_head_after_attack(timeout=10)
@@ -1853,14 +1787,18 @@ class GameBot:
             return "failed"
 
         if head_result == "victory":
-            self.log("出牌阶段完成：未检测到 head.png，但通过 save.png 后检测到胜利")
+            show_template = target_template or "武将部位模板"
+            self.log(f"出牌阶段完成：未检测到 {show_template}，但通过 save.png 后检测到胜利")
             return "victory"
 
         if head_result == "handled":
-            self.log("出牌阶段：head.png 已处理，开始检测 save.png")
+            self.log(f"出牌阶段：{target_template} 已处理，开始检测 save.png")
             self.handle_save_by_cancel()
+        elif head_result == "skipped":
+            self.log("出牌阶段：已跳过部位选择技能效果，继续检测胜利")
         else:
-            self.log("出牌阶段：未出现 head.png，且没有通过 save.png 检测到胜利，继续后续流程")
+            show_template = target_template or "武将部位模板"
+            self.log(f"出牌阶段：未出现 {show_template}，且没有通过 save.png 检测到胜利，继续后续流程")
 
         victory_result = self.wait_victory_only_after_attack(timeout=10)
 
@@ -1937,7 +1875,7 @@ class GameBot:
                 return "victory"
 
             if attack_result == "next_turn":
-                self.log("牌局循环：检测到 acquire.png，进入下一轮")
+                self.log(f"牌局循环：检测到 {self.general_profile.skill_template}，进入下一轮")
                 continue
 
             if attack_result == "failed":
@@ -1948,7 +1886,7 @@ class GameBot:
         return "timeout"
 
     def battle_phase_attack_and_continue(self):
-        self.log("执行出牌阶段，并在检测到 acquire.png 后继续后续轮次")
+        self.log(f"执行出牌阶段，并在检测到 {self.general_profile.skill_template} 后继续后续轮次")
 
         attack_result = self.battle_phase_attack()
 
@@ -1957,7 +1895,7 @@ class GameBot:
             return True
 
         if attack_result == "next_turn":
-            self.log("出牌阶段连续流程：检测到 acquire.png，继续执行下一轮")
+            self.log(f"出牌阶段连续流程：检测到 {self.general_profile.skill_template}，继续执行下一轮")
             result = self.run_battle_until_victory(max_turns=30)
             return result == "victory"
 

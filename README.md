@@ -14,9 +14,18 @@
 
 ---
 
-## 2. 本脚本适用性有限，刚需适配<span style="color:red;">神黄忠+曹纯
+## 2. 本脚本适用性有限，当前仅适配<span style="color:red;">神黄忠+曹纯
 
-囿于本人水平，整个程序基于神黄忠和曹纯技能实现，无法使用其他将灵或武将。
+程序启动后会先进入“出战配置”入口页，需要选择武将和将灵，再进入原来的流程控制页面。
+
+当前内置的唯一组合是：
+
+```text
+武将：神黄忠
+将灵：曹纯
+```
+
+后续如果要支持其他武将或将灵，需要补充对应模板图片、搜索词和判断流程。
 
 ---
 
@@ -70,22 +79,40 @@
 李傕列传/
 ├─ 李傕列传.exe
 ├─ templates/
-│  ├─ start_challenge.png
-│  ├─ victory.png
-│  ├─ acquire.png
-│  ├─ require.png
-│  ├─ attack.png
-│  ├─ confirm.png
-│  ├─ cancel.png
-│  ├─ change_cards.png
-│  ├─ sort.png
-│  ├─ lijue.png
-│  ├─ select_figure.png
-│  ├─ select_figure_2.png
-│  ├─ head.png
-│  ├─ save.png
-│  ├─ increase_damage.png
-│  └─ xiaorui.png
+│  ├─ 武将/
+│  │  └─ 神黄忠/
+│  │     ├─ acquire.png
+│  │     └─ head.png
+│  ├─ 将灵/
+│  │  └─ 曹纯/
+│  │     ├─ require.png
+│  │     ├─ require (2).png
+│  │     └─ xiaorui.png
+│  └─ 通用/
+│     ├─ BOSS/
+│     │  └─ lijue.png
+│     ├─ 卡牌/
+│     │  └─ attack.png
+│     ├─ 流程/
+│     │  ├─ add_hero.png
+│     │  ├─ cancel_2.png
+│     │  ├─ change.png
+│     │  ├─ search.png
+│     │  ├─ select_figure.png
+│     │  ├─ select_figure_2.png
+│     │  ├─ select_hero.png
+│     │  ├─ victory.png
+│     │  └─ war.png
+│     ├─ 流程按钮/
+│     │  ├─ cancel.png
+│     │  ├─ change_cards.png
+│     │  ├─ confirm.png
+│     │  ├─ sort.png
+│     │  └─ start_challenge.png
+│     └─ 流程字/
+│        ├─ increase_damage.png
+│        └─ save.png
+├─ learned_templates/
 ├─ _internal/
 └─ README.md
 ```
@@ -94,6 +121,7 @@
 
 - `李傕列传.exe`：主程序
 - `templates/`：识别模板图片
+- `learned_templates/`：人工监督确认后自动保存的学习模板，目录结构跟随模板分类
 - `_internal/`：程序运行所需文件，不能删除
 - `README.md`：说明文档
 
@@ -101,39 +129,81 @@
 
 ## 2. templates 文件夹不能删除
 
-`templates` 文件夹用于存放所有识别图片。  
+`templates` 文件夹用于存放所有识别图片。
 如果删除或移动，程序会找不到模板，日志里会出现类似：
 
 ```text
-模板不存在：templates/xxx.png
+模板不存在：templates/武将/神黄忠/acquire.png 或 templates/acquire.png
 ```
+
+代码仍兼容旧的平铺路径，例如 `templates/acquire.png`，但推荐使用上面的分类目录。
 
 ---
 
 ## 3. 模板图片说明
 
+### 武将：神黄忠
+
 | 文件名 | 作用 |
 |---|---|
-| `start_challenge.png` | 开始挑战按钮 |
-| `victory.png` | 胜利界面 |
-| `acquire.png` | 武将技能：摸体力值张牌 |
-| `require.png` | 将灵技能询问，例如是否发动缝甲 |
-| `attack.png` | 手牌中的【杀】 |
-| `confirm.png` | 确定按钮 |
-| `cancel.png` | 取消按钮 |
-| `change_cards.png` | 换牌按钮 |
-| `sort.png` | 整理手牌按钮 |
-| `lijue.png` | 李傕头像 |
-| `select_figure.png` | 选择一名其他角色提示 |
-| `select_figure_2.png` | 选择目标的备用提示 |
-| `head.png` | 人体部位选择图 |
-| `save.png` | 求桃提示 |
-| `increase_damage.png` | 增加伤害提示 |
-| `xiaorui.png` | 骁锐提示 |
+| `templates/武将/神黄忠/acquire.png` | 技能：裂穹摸牌 |
+| `templates/武将/神黄忠/head.png` | 技能：裂穹击中 |
+
+### 将灵：曹纯
+
+| 文件名 | 作用 |
+|---|---|
+| `templates/将灵/曹纯/require.png` | 技能字：是否发动缮甲 |
+| `templates/将灵/曹纯/require (2).png` | 技能：是否发动缮甲-全 |
+| `templates/将灵/曹纯/xiaorui.png` | 技能字：是否发动骁锐 |
+
+### 通用逻辑/流程
+
+| 文件名 | 作用 |
+|---|---|
+| `templates/通用/流程按钮/start_challenge.png` | 流程按钮：立即挑战 |
+| `templates/通用/流程/victory.png` | 流程：起始界面 |
+| `templates/通用/流程/add_hero.png` | 流程：选择武将 |
+| `templates/通用/卡牌/attack.png` | 卡牌：杀 |
+| `templates/通用/流程按钮/confirm.png` | 流程按钮：确认 |
+| `templates/通用/流程按钮/cancel.png` | 流程按钮：取消 |
+| `templates/通用/流程/cancel_2.png` | 流程：窗口关闭 |
+| `templates/通用/流程/change.png` | 流程：是否换牌 |
+| `templates/通用/流程按钮/change_cards.png` | 流程按钮：换牌 |
+| `templates/通用/流程按钮/sort.png` | 流程按钮：整理手牌 |
+| `templates/通用/BOSS/lijue.png` | BOSS：李傕 |
+| `templates/通用/流程/search.png` | 流程：搜索 |
+| `templates/通用/流程/select_figure.png` | 流程：选择一个其他角色 |
+| `templates/通用/流程/select_figure_2.png` | 流程：选择一个目标 |
+| `templates/通用/流程/select_hero.png` | 流程：选择武将-神黄忠 |
+| `templates/通用/流程字/save.png` | 流程字：是否出桃 |
+| `templates/通用/流程/war.png` | 流程：关卡界面 |
+| `templates/通用/流程字/increase_damage.png` | 流程字：是否增伤 |
+
+人工监督学习弹窗会显示类似：
+
+```text
+武将：神黄忠 - acquire.png（技能：裂穹摸牌）
+```
+
+保存到 `learned_templates/` 的学习模板也会使用对应分类和中文前缀，方便后续查找。
 
 ---
 
-## 4. 阈值设置说明
+## 4. 源码结构说明
+
+| 文件名 | 作用 |
+|---|---|
+| `main.py` | UI 入口、出战配置入口、阈值设置窗口、人工监督弹窗 |
+| `bot_core.py` | 自动化核心流程、截图、模板匹配、点击与完整战斗流程 |
+| `app_paths.py` | 程序基础路径、模板目录、学习模板目录、设置文件路径 |
+| `profile_registry.py` | 武将/将灵配置，例如神黄忠、曹纯 |
+| `template_registry.py` | 模板分类路径、中文显示名、监督学习保存路径 |
+| `settings_store.py` | 阈值配置、设置读写 |
+
+---
+
+## 5. 阈值设置说明
 
 点击 UI 中的：
 
@@ -154,7 +224,7 @@
 
 ---
 
-## 5. 各阈值含义
+## 6. 各阈值含义
 
 | 参数 | 中文含义 | 说明 |
 |---|---|---|
@@ -162,7 +232,7 @@
 | `THRESH_SMALL` | 小图标/提示阈值 | 用于 `select_figure.png`、`select_figure_2.png` |
 | `THRESH_CARD` | 手牌识别阈值 | 用于识别 `attack.png`，也就是【杀】 |
 | `THRESH_BOSS` | Boss 头像阈值 | 用于识别 `lijue.png` |
-| `THRESH_HEAD` | 人体图阈值 | 用于识别 `head.png` |
+| `THRESH_HEAD` | 神黄忠部位图阈值 | 用于识别 `head.png`，也就是神黄忠技能效果的人体部位选择图 |
 | `THRESH_VICTORY` | 胜利界面阈值 | 用于识别 `victory.png` |
 | `THRESH_SAVE` | 求桃阈值 | 用于识别 `save.png` |
 | `THRESH_ACQUIRE` | 武将技能阈值 | 用于识别 `acquire.png` |
@@ -172,7 +242,7 @@
 
 ---
 
-## 6. 推荐初始阈值
+## 7. 推荐初始阈值
 
 如果没有特殊情况，可以先使用默认值：
 
@@ -192,7 +262,7 @@ THRESH_CONFIRM  = 0.55
 
 ---
 
-## 7. 什么时候调高阈值？
+## 8. 什么时候调高阈值？
 
 如果出现以下情况，建议调高对应阈值：
 
@@ -217,7 +287,7 @@ THRESH_REQUIRE
 
 ---
 
-## 8. 什么时候调低阈值？
+## 9. 什么时候调低阈值？
 
 如果出现以下情况，建议调低对应阈值：
 
@@ -242,7 +312,7 @@ THRESH_ACQUIRE
 
 ---
 
-## 9. 保存截图用于调试
+## 10. 保存截图用于调试
 
 点击 UI 中的：
 

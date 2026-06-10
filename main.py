@@ -8,44 +8,40 @@ except Exception:
     Image = None
     ImageTk = None
 
-from bot_core import (
-    GameBot,
-    BotSettings,
+from bot_core import GameBot
+from profile_registry import (
+    AVAILABLE_GENERAL_PROFILES,
+    AVAILABLE_SPIRIT_PROFILES,
+    DEFAULT_GENERAL_PROFILE_KEY,
+    DEFAULT_SPIRIT_PROFILE_KEY,
+    resolve_general_profile,
+    resolve_spirit_profile,
+)
+from settings_store import (
     THRESHOLD_META,
     DEFAULT_SETTING_VALUES,
     SETTINGS_FILE,
     load_bot_settings,
     save_bot_settings,
 )
+from template_registry import get_template_display_name
 
 
 class BotUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("李傕列传")
-
-        # 主 UI 稍微加高，并保持宽度
-        # 这样底部日志框能稳定显示
-        self.root.geometry("365x700+601+258")
         self.root.resizable(False, False)
-
         self.root.attributes("-topmost", True)
 
-        self.settings, self.settings_loaded, self.settings_load_error = load_bot_settings()
-        self.bot = GameBot(
-            log_func=self.write_log,
-            settings=self.settings,
-            minimize_func=self.minimize_ui,
-            supervision_func=self.confirm_template_supervision,
-        )
+        self.general_profile = None
+        self.spirit_profile = None
+        self.settings = None
+        self.settings_loaded = False
+        self.settings_load_error = None
+        self.bot = None
 
         self.setup_style()
-        self.build_ui()
-
-        if self.settings_loaded:
-            self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}")
-        elif self.settings_load_error:
-            self.write_log(f"[设置] {self.settings_load_error}，已使用默认阈值")
+        self.build_entry_ui()
 
     # =========================================================
     # 样式
@@ -64,6 +60,11 @@ class BotUI:
         style.configure(
             "Main.TFrame",
             background="#1f1a14"
+        )
+
+        style.configure(
+            "PanelInner.TFrame",
+            background="#2b2118"
         )
 
         style.configure(
@@ -103,6 +104,27 @@ class BotUI:
         )
 
         style.configure(
+            "Muted.TLabel",
+            background="#1f1a14",
+            foreground="#c8a66a",
+            font=("Microsoft YaHei", 8)
+        )
+
+        style.configure(
+            "PanelText.TLabel",
+            background="#2b2118",
+            foreground="#f6e6bd",
+            font=("Microsoft YaHei", 8)
+        )
+
+        style.configure(
+            "PanelTextBold.TLabel",
+            background="#2b2118",
+            foreground="#ffe0a0",
+            font=("Microsoft YaHei", 8, "bold")
+        )
+
+        style.configure(
             "Gold.TButton",
             font=("Microsoft YaHei", 8, "bold"),
             padding=2
@@ -113,6 +135,176 @@ class BotUI:
             foreground=[("active", "#4b2b00")],
             background=[("active", "#f5c56b")]
         )
+
+    # =========================================================
+    # 入口选择 UI
+    # =========================================================
+
+    def clear_root(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def build_entry_ui(self):
+        self.clear_root()
+        self.root.title("李傕列传 - 选择搭配")
+        self.root.geometry("365x360+601+258")
+        self.root.configure(bg="#1f1a14")
+
+        main = ttk.Frame(self.root, style="Main.TFrame")
+        main.pack(fill="both", expand=True, padx=10, pady=10)
+
+        title = ttk.Label(
+            main,
+            text="李傕列传",
+            style="Title.TLabel"
+        )
+        title.pack(anchor="w", padx=2, pady=(2, 0))
+
+        subtitle = ttk.Label(
+            main,
+            text="请选择武将和将灵后进入控制台",
+            style="Muted.TLabel"
+        )
+        subtitle.pack(anchor="w", padx=3, pady=(0, 10))
+
+        select_frame = ttk.LabelFrame(
+            main,
+            text="出战配置",
+            style="Panel.TLabelframe"
+        )
+        select_frame.pack(fill="x", pady=(0, 8))
+
+        select_frame.columnconfigure(0, weight=1)
+
+        general_names = [profile.name for profile in AVAILABLE_GENERAL_PROFILES.values()]
+        spirit_names = [profile.name for profile in AVAILABLE_SPIRIT_PROFILES.values()]
+
+        self.general_name_to_key = {
+            profile.name: profile.key
+            for profile in AVAILABLE_GENERAL_PROFILES.values()
+        }
+        self.spirit_name_to_key = {
+            profile.name: profile.key
+            for profile in AVAILABLE_SPIRIT_PROFILES.values()
+        }
+
+        default_general = resolve_general_profile(DEFAULT_GENERAL_PROFILE_KEY)
+        default_spirit = resolve_spirit_profile(DEFAULT_SPIRIT_PROFILE_KEY)
+
+        self.general_var = tk.StringVar(value=default_general.name)
+        self.spirit_var = tk.StringVar(value=default_spirit.name)
+
+        self.add_profile_selector(
+            select_frame,
+            row=0,
+            title="武将",
+            variable=self.general_var,
+            values=general_names
+        )
+        self.add_profile_selector(
+            select_frame,
+            row=1,
+            title="将灵",
+            variable=self.spirit_var,
+            values=spirit_names
+        )
+
+        note_frame = ttk.LabelFrame(
+            main,
+            text="当前支持",
+            style="Panel.TLabelframe"
+        )
+        note_frame.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(
+            note_frame,
+            text="当前仅内置：武将「神黄忠」+ 将灵「曹纯」。",
+            style="PanelText.TLabel"
+        ).pack(anchor="w", padx=8, pady=(6, 2))
+
+        ttk.Label(
+            note_frame,
+            text="后续新增武将或将灵时，在配置表中补充选项，再接入对应图片和判断流程。",
+            style="PanelText.TLabel",
+            wraplength=320,
+            justify="left"
+        ).pack(anchor="w", padx=8, pady=(0, 7))
+
+        ttk.Button(
+            main,
+            text="进入控制台",
+            style="Gold.TButton",
+            command=self.enter_main_ui
+        ).pack(fill="x", padx=4, pady=(2, 8))
+
+        hint = ttk.Label(
+            main,
+            text="进入后仍是原来的流程控制页面",
+            style="Hint.TLabel"
+        )
+        hint.pack(anchor="w", padx=3)
+
+    def add_profile_selector(self, parent, row, title, variable, values):
+        block = ttk.Frame(parent, style="PanelInner.TFrame")
+        block.grid(row=row, column=0, sticky="ew", padx=8, pady=(7, 3))
+        block.columnconfigure(0, weight=0)
+        block.columnconfigure(1, weight=1)
+
+        label = ttk.Label(
+            block,
+            text=title,
+            style="PanelTextBold.TLabel"
+        )
+        label.grid(row=0, column=0, sticky="w", padx=(0, 8))
+
+        combo = ttk.Combobox(
+            block,
+            textvariable=variable,
+            values=values,
+            state="readonly",
+            font=("Microsoft YaHei", 9),
+            width=18
+        )
+        combo.grid(row=0, column=1, sticky="ew")
+
+    def enter_main_ui(self):
+        general_key = self.general_name_to_key.get(
+            self.general_var.get(),
+            DEFAULT_GENERAL_PROFILE_KEY
+        )
+        spirit_key = self.spirit_name_to_key.get(
+            self.spirit_var.get(),
+            DEFAULT_SPIRIT_PROFILE_KEY
+        )
+
+        self.general_profile = resolve_general_profile(general_key)
+        self.spirit_profile = resolve_spirit_profile(spirit_key)
+
+        self.clear_root()
+        self.root.title(f"李傕列传 - {self.general_profile.name} / {self.spirit_profile.name}")
+
+        # 主 UI 稍微加高，并保持宽度
+        # 这样底部日志框能稳定显示
+        self.root.geometry("365x710+601+258")
+        self.root.configure(bg="#1f1a14")
+
+        self.settings, self.settings_loaded, self.settings_load_error = load_bot_settings()
+        self.bot = GameBot(
+            log_func=self.write_log,
+            settings=self.settings,
+            minimize_func=self.minimize_ui,
+            supervision_func=self.confirm_template_supervision,
+            general_profile=self.general_profile,
+            spirit_profile=self.spirit_profile,
+        )
+
+        self.build_ui()
+        self.write_log(f"[入口] 当前武将：{self.general_profile.name}；当前将灵：{self.spirit_profile.name}")
+
+        if self.settings_loaded:
+            self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}")
+        elif self.settings_load_error:
+            self.write_log(f"[设置] {self.settings_load_error}，已使用默认阈值")
 
     # =========================================================
     # 主 UI
@@ -135,6 +327,17 @@ class BotUI:
             style="Title.TLabel"
         )
         title.pack(side="left", padx=(2, 0))
+
+        profile_text = "当前：未选择"
+        if self.general_profile is not None and self.spirit_profile is not None:
+            profile_text = f"当前：{self.general_profile.name} / {self.spirit_profile.name}"
+
+        profile_label = ttk.Label(
+            title_frame,
+            text=profile_text,
+            style="Muted.TLabel"
+        )
+        profile_label.pack(side="left", padx=(8, 0), pady=(13, 0))
 
         author = ttk.Label(
             title_frame,
@@ -678,6 +881,7 @@ class BotUI:
 
     def open_template_supervision_dialog(self, template_name, confidence, threshold, image):
         result = {"accepted": False}
+        display_name = get_template_display_name(template_name)
 
         try:
             previous_state = self.root.state()
@@ -710,14 +914,16 @@ class BotUI:
         info = tk.Label(
             win,
             text=(
-                f"模板：{template_name}\n"
+                f"模板：{display_name}\n"
+                f"逻辑名：{template_name}\n"
                 f"当前置信度：{confidence:.3f}\n"
                 f"目标阈值：{threshold:.3f}"
             ),
             font=("Microsoft YaHei", 9),
             bg="#1f1a14",
             fg="#f6e6bd",
-            justify="left"
+            justify="left",
+            wraplength=380
         )
         info.pack(fill="x", padx=16, pady=(0, 8))
 
@@ -792,7 +998,7 @@ class BotUI:
         yes_btn.focus_set()
 
         self.write_log(
-            f"[人工监督] 等待确认：{template_name} | "
+            f"[人工监督] 等待确认：{display_name} | "
             f"置信度={confidence:.3f} | 阈值={threshold:.3f}"
         )
 
