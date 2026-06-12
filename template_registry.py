@@ -40,6 +40,26 @@ TEMPLATE_META = {
         "武将_神黄忠_技能_裂穹击中",
     ),
 
+    # 武将：轲比能
+    "koujing.png": template_meta(
+        "武将/轲比能/koujing.png",
+        "武将：轲比能 - koujing.png（技能：寇旌）",
+        "武将/轲比能/koujing",
+        "武将_轲比能_技能_寇旌",
+    ),
+    "select_kebineng.png": template_meta(
+        "武将/轲比能/select_kebineng.png",
+        "武将：轲比能 - select_kebineng.png（选择武将）",
+        "武将/轲比能/select_kebineng",
+        "武将_轲比能_选择武将",
+    ),
+    "kebineng_card_marker.png": template_meta(
+        "武将/轲比能/kebineng_card_marker.png",
+        "武将：轲比能 - kebineng_card_marker.png（寇旌杀手牌标记）",
+        "武将/轲比能/kebineng_card_marker",
+        "武将_轲比能_寇旌杀手牌标记",
+    ),
+
     # 将灵：曹纯
     "require.png": template_meta(
         "将灵/曹纯/require.png",
@@ -114,6 +134,12 @@ TEMPLATE_META = {
         "通用：change_cards.png（流程按钮：换牌）",
         "通用/流程按钮/change_cards",
         "通用_流程按钮_换牌",
+    ),
+    "select_all.png": template_meta(
+        "通用/流程按钮/select_all.png",
+        "通用：select_all.png（流程按钮：全选）",
+        "通用/流程按钮/select_all",
+        "通用_流程按钮_全选",
     ),
     "sort.png": template_meta(
         "通用/流程按钮/sort.png",

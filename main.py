@@ -1,6 +1,7 @@
 import threading
 import tkinter as tk
 from tkinter import ttk, messagebox
+from datetime import datetime
 
 try:
     from PIL import Image, ImageTk
@@ -8,14 +9,14 @@ except Exception:
     Image = None
     ImageTk = None
 
+from app_paths import LOG_DIR
 from bot_core import GameBot
 from profile_registry import (
-    AVAILABLE_GENERAL_PROFILES,
-    AVAILABLE_SPIRIT_PROFILES,
-    DEFAULT_GENERAL_PROFILE_KEY,
-    DEFAULT_SPIRIT_PROFILE_KEY,
+    AVAILABLE_COMBO_PROFILES,
+    DEFAULT_COMBO_PROFILE_KEY,
     resolve_general_profile,
     resolve_spirit_profile,
+    resolve_combo_profile,
 )
 from settings_store import (
     THRESHOLD_META,
@@ -39,8 +40,14 @@ class BotUI:
         self.settings_loaded = False
         self.settings_load_error = None
         self.bot = None
+        self.combo_profile = None
+        self.log_file_path = None
+        self.log_file_lock = threading.Lock()
+
+        self.settings, self.settings_loaded, self.settings_load_error = load_bot_settings()
 
         self.setup_style()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.build_entry_ui()
 
     # =========================================================
@@ -144,10 +151,19 @@ class BotUI:
         for widget in self.root.winfo_children():
             widget.destroy()
 
+    def apply_window_geometry(self, geometry, fallback):
+        try:
+            self.root.geometry(geometry or fallback)
+        except Exception:
+            self.root.geometry(fallback)
+
     def build_entry_ui(self):
         self.clear_root()
         self.root.title("李傕列传 - 选择搭配")
-        self.root.geometry("365x360+601+258")
+        self.apply_window_geometry(
+            getattr(self.settings, "ENTRY_WINDOW_GEOMETRY", "365x360+601+258"),
+            "365x360+601+258"
+        )
         self.root.configure(bg="#1f1a14")
 
         main = ttk.Frame(self.root, style="Main.TFrame")
@@ -162,7 +178,7 @@ class BotUI:
 
         subtitle = ttk.Label(
             main,
-            text="请选择武将和将灵后进入控制台",
+            text="请选择组合后进入控制台",
             style="Muted.TLabel"
         )
         subtitle.pack(anchor="w", padx=3, pady=(0, 10))
@@ -176,37 +192,23 @@ class BotUI:
 
         select_frame.columnconfigure(0, weight=1)
 
-        general_names = [profile.name for profile in AVAILABLE_GENERAL_PROFILES.values()]
-        spirit_names = [profile.name for profile in AVAILABLE_SPIRIT_PROFILES.values()]
-
-        self.general_name_to_key = {
+        combo_names = [profile.name for profile in AVAILABLE_COMBO_PROFILES.values()]
+        self.combo_name_to_key = {
             profile.name: profile.key
-            for profile in AVAILABLE_GENERAL_PROFILES.values()
-        }
-        self.spirit_name_to_key = {
-            profile.name: profile.key
-            for profile in AVAILABLE_SPIRIT_PROFILES.values()
+            for profile in AVAILABLE_COMBO_PROFILES.values()
         }
 
-        default_general = resolve_general_profile(DEFAULT_GENERAL_PROFILE_KEY)
-        default_spirit = resolve_spirit_profile(DEFAULT_SPIRIT_PROFILE_KEY)
-
-        self.general_var = tk.StringVar(value=default_general.name)
-        self.spirit_var = tk.StringVar(value=default_spirit.name)
+        default_combo = resolve_combo_profile(
+            getattr(self.settings, "LAST_COMBO_PROFILE_KEY", DEFAULT_COMBO_PROFILE_KEY)
+        )
+        self.combo_var = tk.StringVar(value=default_combo.name)
 
         self.add_profile_selector(
             select_frame,
             row=0,
-            title="武将",
-            variable=self.general_var,
-            values=general_names
-        )
-        self.add_profile_selector(
-            select_frame,
-            row=1,
-            title="将灵",
-            variable=self.spirit_var,
-            values=spirit_names
+            title="组合",
+            variable=self.combo_var,
+            values=combo_names
         )
 
         note_frame = ttk.LabelFrame(
@@ -218,13 +220,13 @@ class BotUI:
 
         ttk.Label(
             note_frame,
-            text="当前仅内置：武将「神黄忠」+ 将灵「曹纯」。",
+            text="当前内置：神黄忠/曹纯、轲比能/神曹操。",
             style="PanelText.TLabel"
         ).pack(anchor="w", padx=8, pady=(6, 2))
 
         ttk.Label(
             note_frame,
-            text="后续新增武将或将灵时，在配置表中补充选项，再接入对应图片和判断流程。",
+            text="轲比能的寇旌与手牌出牌循环已接入；神曹操按无将灵技能处理。",
             style="PanelText.TLabel",
             wraplength=320,
             justify="left"
@@ -268,27 +270,30 @@ class BotUI:
         combo.grid(row=0, column=1, sticky="ew")
 
     def enter_main_ui(self):
-        general_key = self.general_name_to_key.get(
-            self.general_var.get(),
-            DEFAULT_GENERAL_PROFILE_KEY
-        )
-        spirit_key = self.spirit_name_to_key.get(
-            self.spirit_var.get(),
-            DEFAULT_SPIRIT_PROFILE_KEY
+        combo_key = self.combo_name_to_key.get(
+            self.combo_var.get(),
+            DEFAULT_COMBO_PROFILE_KEY
         )
 
-        self.general_profile = resolve_general_profile(general_key)
-        self.spirit_profile = resolve_spirit_profile(spirit_key)
+        self.settings.LAST_COMBO_PROFILE_KEY = combo_key
+        self.settings.ENTRY_WINDOW_GEOMETRY = self.root.geometry()
+        save_bot_settings(self.settings)
+
+        self.combo_profile = resolve_combo_profile(combo_key)
+        self.general_profile = resolve_general_profile(self.combo_profile.general_profile_key)
+        self.spirit_profile = resolve_spirit_profile(self.combo_profile.spirit_profile_key)
 
         self.clear_root()
-        self.root.title(f"李傕列传 - {self.general_profile.name} / {self.spirit_profile.name}")
+        self.root.title(f"李傕列传 - {self.combo_profile.name}")
 
         # 主 UI 稍微加高，并保持宽度
         # 这样底部日志框能稳定显示
-        self.root.geometry("365x710+601+258")
+        self.apply_window_geometry(
+            getattr(self.settings, "MAIN_WINDOW_GEOMETRY", "365x710+601+258"),
+            "365x710+601+258"
+        )
         self.root.configure(bg="#1f1a14")
 
-        self.settings, self.settings_loaded, self.settings_load_error = load_bot_settings()
         self.bot = GameBot(
             log_func=self.write_log,
             settings=self.settings,
@@ -299,7 +304,11 @@ class BotUI:
         )
 
         self.build_ui()
-        self.write_log(f"[入口] 当前武将：{self.general_profile.name}；当前将灵：{self.spirit_profile.name}")
+        self.configure_file_logging(announce=True)
+        self.write_log(
+            f"[入口] 当前组合：{self.combo_profile.name}；"
+            f"武将：{self.general_profile.name}；将灵：{self.spirit_profile.name}"
+        )
 
         if self.settings_loaded:
             self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}")
@@ -330,7 +339,10 @@ class BotUI:
 
         profile_text = "当前：未选择"
         if self.general_profile is not None and self.spirit_profile is not None:
-            profile_text = f"当前：{self.general_profile.name} / {self.spirit_profile.name}"
+            if self.combo_profile is not None:
+                profile_text = f"当前：{self.combo_profile.name}"
+            else:
+                profile_text = f"当前：{self.general_profile.name} / {self.spirit_profile.name}"
 
         profile_label = ttk.Label(
             title_frame,
@@ -450,7 +462,7 @@ class BotUI:
 
         ttk.Button(
             setting_frame,
-            text="阈值设置",
+            text="设置",
             style="Gold.TButton",
             command=self.open_threshold_settings
         ).grid(row=0, column=0, sticky="ew", padx=7, pady=4)
@@ -492,10 +504,17 @@ class BotUI:
 
         ttk.Button(
             control_frame,
+            text="返回入口",
+            style="Gold.TButton",
+            command=self.return_to_entry_ui
+        ).grid(row=1, column=0, sticky="ew", padx=7, pady=(0, 4))
+
+        ttk.Button(
+            control_frame,
             text="清空日志",
             style="Gold.TButton",
             command=self.clear_log
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", padx=7, pady=(0, 4))
+        ).grid(row=1, column=1, sticky="ew", padx=7, pady=(0, 4))
 
         # -------------------------
         # 日志：固定预留高度
@@ -547,15 +566,15 @@ class BotUI:
 
     def open_threshold_settings(self):
         win = tk.Toplevel(self.root)
-        win.title("阈值设置")
-        win.geometry("560x640+945+258")
+        win.title("设置")
+        win.geometry("560x690+945+258")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         win.configure(bg="#1f1a14")
 
         title = tk.Label(
             win,
-            text="阈值设置",
+            text="设置",
             font=("Microsoft YaHei", 16, "bold"),
             bg="#1f1a14",
             fg="#ffd36b"
@@ -724,6 +743,40 @@ class BotUI:
         )
         supervision_tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
+        debug_row = supervision_row + 1
+        log_to_file_var = tk.BooleanVar(value=self.settings.LOG_TO_FILE)
+
+        debug_frame = tk.Frame(panel, bg="#2b2118")
+        debug_frame.grid(row=debug_row, column=0, sticky="ew", padx=10, pady=(8, 3))
+        debug_frame.columnconfigure(0, weight=1)
+
+        log_check = tk.Checkbutton(
+            debug_frame,
+            text="启用日志写入文件",
+            variable=log_to_file_var,
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#2b2118",
+            fg="#ffe0a0",
+            selectcolor="#14100c",
+            activebackground="#2b2118",
+            activeforeground="#ffe0a0",
+            anchor="w"
+        )
+        log_check.grid(row=0, column=0, sticky="w")
+
+        current_log_path = str(self.log_file_path) if self.log_file_path else "启用后会写入 logs 目录"
+        log_tip = tk.Label(
+            debug_frame,
+            text=f"用于调试时复制完整流程日志。当前文件：{current_log_path}",
+            font=("Microsoft YaHei", 7),
+            bg="#2b2118",
+            fg="#cdbb92",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        log_tip.grid(row=1, column=0, sticky="w", pady=(0, 0))
+
         # =====================================================
         # 底部按钮
         # =====================================================
@@ -774,23 +827,25 @@ class BotUI:
 
             self.settings.SUPERVISION_ENABLED = supervision_enabled_var.get()
             self.settings.SUPERVISION_MIN_CONF = supervision_min_value
+            self.settings.LOG_TO_FILE = log_to_file_var.get()
 
             saved, save_error = save_bot_settings(self.settings)
 
             if saved:
-                self.write_log(f"[设置] 阈值已更新并保存：{SETTINGS_FILE}")
+                self.configure_file_logging(announce=True)
+                self.write_log(f"[设置] 已更新并保存：{SETTINGS_FILE}")
             else:
-                self.write_log(f"[设置] 阈值已更新，但{save_error}")
+                self.write_log(f"[设置] 已更新，但{save_error}")
                 messagebox.showwarning(
-                    "阈值保存失败",
-                    f"阈值已在本次运行中生效，但没有写入本地文件。\n{save_error}",
+                    "设置保存失败",
+                    f"设置已在本次运行中生效，但没有写入本地文件。\n{save_error}",
                     parent=win
                 )
                 return
 
             messagebox.showinfo(
-                "阈值设置",
-                "阈值已更新并保存，后续启动会自动读取。",
+                "设置",
+                "设置已更新并保存，后续启动会自动读取。",
                 parent=win
             )
 
@@ -801,10 +856,11 @@ class BotUI:
 
             supervision_enabled_var.set(DEFAULT_SETTING_VALUES["SUPERVISION_ENABLED"])
             supervision_min_var.set(f"{DEFAULT_SETTING_VALUES['SUPERVISION_MIN_CONF']:.2f}")
+            log_to_file_var.set(DEFAULT_SETTING_VALUES["LOG_TO_FILE"])
 
         apply_btn = tk.Button(
             button_frame,
-            text="应用阈值",
+            text="应用设置",
             font=("Microsoft YaHei", 8, "bold"),
             bg="#b8863b",
             fg="white",
@@ -844,6 +900,88 @@ class BotUI:
     # =========================================================
     # UI 工具函数
     # =========================================================
+
+    def safe_log_filename_part(self, text):
+        keep = []
+
+        for char in text:
+            if char in '<>:"/\\|?*':
+                keep.append("_")
+            elif char.isspace():
+                keep.append("_")
+            else:
+                keep.append(char)
+
+        return "".join(keep).strip("._") or "combo"
+
+    def configure_file_logging(self, announce=False):
+        if self.settings is None or not getattr(self.settings, "LOG_TO_FILE", True):
+            had_log_file = self.log_file_path is not None
+            self.log_file_path = None
+
+            if announce and had_log_file:
+                self.write_log("[日志] 文件日志已关闭")
+
+            return None
+
+        if self.log_file_path is None:
+            LOG_DIR.mkdir(exist_ok=True)
+            combo_name = self.combo_profile.name if self.combo_profile is not None else "unknown"
+            combo_part = self.safe_log_filename_part(combo_name)
+            filename = f"bot_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{combo_part}.log"
+            self.log_file_path = LOG_DIR / filename
+
+        if announce:
+            self.write_log(f"[日志] 文件日志已启用：{self.log_file_path}")
+
+        return self.log_file_path
+
+    def write_log_to_file(self, text):
+        if self.log_file_path is None:
+            return
+
+        try:
+            with self.log_file_lock:
+                with self.log_file_path.open("a", encoding="utf-8") as f:
+                    f.write(text + "\n")
+        except Exception:
+            # 文件日志是调试辅助，不应影响自动化主流程。
+            pass
+
+    def save_window_cache(self, screen_name):
+        if self.settings is None:
+            return
+
+        if screen_name == "entry":
+            self.settings.ENTRY_WINDOW_GEOMETRY = self.root.geometry()
+        elif screen_name == "main":
+            self.settings.MAIN_WINDOW_GEOMETRY = self.root.geometry()
+
+        save_bot_settings(self.settings)
+
+    def return_to_entry_ui(self):
+        if self.bot is not None:
+            self.bot.stop_flag = True
+            self.bot.running = False
+
+        self.save_window_cache("main")
+        self.write_log("[入口] 返回组合选择")
+        self.bot = None
+        self.general_profile = None
+        self.spirit_profile = None
+        self.combo_profile = None
+        self.log_file_path = None
+        self.build_entry_ui()
+
+    def on_close(self):
+        if self.bot is not None:
+            self.bot.stop_flag = True
+            self.bot.running = False
+            self.save_window_cache("main")
+        else:
+            self.save_window_cache("entry")
+
+        self.root.destroy()
 
     def minimize_ui(self):
         """
@@ -1010,9 +1148,12 @@ class BotUI:
         return result["accepted"]
 
     def write_log(self, text):
-        self.log_text.insert("end", text + "\n")
-        self.log_text.see("end")
-        self.root.update_idletasks()
+        self.write_log_to_file(text)
+
+        if hasattr(self, "log_text"):
+            self.log_text.insert("end", text + "\n")
+            self.log_text.see("end")
+            self.root.update_idletasks()
 
     def clear_log(self):
         self.log_text.delete("1.0", "end")

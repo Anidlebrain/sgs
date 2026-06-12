@@ -25,6 +25,10 @@ class BotSettings:
 
     SUPERVISION_ENABLED: bool = True
     SUPERVISION_MIN_CONF: float = 0.50
+    LOG_TO_FILE: bool = True
+    LAST_COMBO_PROFILE_KEY: str = "shen_huangzhong_cao_chun"
+    ENTRY_WINDOW_GEOMETRY: str = "365x360+601+258"
+    MAIN_WINDOW_GEOMETRY: str = "365x710+601+258"
 
     GAME_REGION_WIDTH: int = 1280
     GAME_REGION_HEIGHT: int = 800
@@ -76,7 +80,7 @@ THRESHOLD_META = [
     {
         "name": "THRESH_ACQUIRE",
         "title": "武将技能阈值",
-        "desc": "用于 acquire.png，也就是【摸体力值张牌】。",
+        "desc": "用于 acquire.png / koujing.png，也就是武将技能提示识别。",
     },
     {
         "name": "THRESH_REQUIRE",
@@ -123,8 +127,14 @@ def load_bot_settings():
         try:
             if isinstance(default_value, bool):
                 values[name] = bool(value)
-            else:
+            elif isinstance(default_value, int):
+                values[name] = int(float(value))
+            elif isinstance(default_value, float):
                 values[name] = float(value)
+            elif isinstance(default_value, str):
+                values[name] = str(value)
+            else:
+                values[name] = value
         except (TypeError, ValueError):
             return BotSettings(), False, f"设置项 {name} 不是有效数值"
 

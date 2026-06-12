@@ -51,6 +51,7 @@ class GameBot:
         self.xiaorui_last_click_time = 0
         self.save_cancel_last_click_time = 0
         self.cancel_last_click_time = 0
+        self.kebineng_last_select_all_anchor = None
 
     # -------------------------
     # 日志
@@ -718,7 +719,14 @@ class GameBot:
 
         return self._match_to_rect(match)
 
-    def find_all_templates(self, template_name, threshold=None, region=None, min_distance=20):
+    def find_all_templates(
+        self,
+        template_name,
+        threshold=None,
+        region=None,
+        min_distance=20,
+        allow_supervision=True
+    ):
         if threshold is None:
             threshold = self.settings.DEFAULT_THRESHOLD
 
@@ -762,7 +770,7 @@ class GameBot:
                 cy = offset_y + y + th // 2
                 candidates.append((cx, cy, float(conf)))
 
-        if not candidates and self._maybe_accept_supervised_match(template_name, threshold, best):
+        if allow_supervision and not candidates and self._maybe_accept_supervised_match(template_name, threshold, best):
             self._remember_template_match(template_name, best)
             cx = best["x"] + best["w"] // 2
             cy = best["y"] + best["h"] // 2
@@ -841,7 +849,13 @@ class GameBot:
 
     def detect_require_prompt(self):
         template_name = self.spirit_profile.prompt_template
-        threshold = getattr(self.settings, self.spirit_profile.prompt_threshold_name)
+        threshold_name = self.spirit_profile.prompt_threshold_name
+
+        if not template_name or not threshold_name:
+            self.log(f"{self.spirit_profile.name} 没有将灵技能触发模板，跳过检测")
+            return False
+
+        threshold = getattr(self.settings, threshold_name)
 
         found = self.find_template(
             template_name,
@@ -917,6 +931,39 @@ class GameBot:
                     f"置信度={conf:.3f} | 坐标=({x}, {y}) | {source_text}"
                 )
                 return found
+
+            time.sleep(0.25)
+
+        self.log(f"等待超时：{desc or template_name}")
+        return None
+
+    def wait_template_rect(self, template_name, threshold=None, timeout=5, region=None, desc=None):
+        if threshold is None:
+            threshold = self.settings.DEFAULT_THRESHOLD
+
+        self.log(f"等待出现：{desc or template_name}，最长 {timeout} 秒")
+
+        start = time.time()
+
+        while time.time() - start < timeout:
+            if self.stop_flag:
+                self.log("收到停止信号，停止等待")
+                return None
+
+            if self.paused:
+                time.sleep(0.2)
+                continue
+
+            rect = self.find_template_rect(template_name, threshold, region)
+
+            if rect is not None:
+                x, y, w, h, conf = rect
+                source_text = self.get_last_match_source_text(template_name)
+                self.log(
+                    f"已出现：{desc or template_name} | "
+                    f"置信度={conf:.3f} | 区域=({x}, {y}, {w}, {h}) | {source_text}"
+                )
+                return rect
 
             time.sleep(0.25)
 
@@ -1397,6 +1444,347 @@ class GameBot:
         self.log(f"下一轮清理阶段超时：未检测到 {template_name}，也未检测到 victory.png")
         return "timeout"
 
+    # -------------------------
+    # 轲比能出牌阶段辅助
+    # -------------------------
+
+    def bottom_right_action_region(self):
+        game_region = self.game_search_region()
+
+        if game_region is None:
+            return None
+
+        x, y, w, h = game_region
+        left = x + int(w * 0.62)
+        top = y + int(h * 0.70)
+        region = left, top, x + w - left, y + h - top
+        return self.intersect_regions(region, game_region)
+
+    def kebineng_card_points_from_anchor(self, anchor_x=None, anchor_y=None):
+        """
+        full.png 中 select_all.png 中心为 (846, 614)，首排手牌中心约在 y=593。
+        用全选按钮作为锚点，避免直接写死屏幕绝对坐标。
+        """
+        if anchor_x is not None and anchor_y is not None:
+            offsets = [
+                (-716, -21),
+                (-631, -21),
+                (-545, -21),
+                (-460, -21),
+                (-373, -21),
+                (-288, -21),
+                (-202, -21),
+                (-115, -21),
+                (-29, -21),
+            ]
+            return [
+                (int(anchor_x + dx), int(anchor_y + dy))
+                for dx, dy in offsets
+            ]
+
+        game_region = self.game_search_region()
+
+        if game_region is None:
+            return []
+
+        x, y, w, h = game_region
+        reference_w = 1159
+        reference_h = 639
+        reference_points = [
+            (130, 593),
+            (215, 593),
+            (301, 593),
+            (386, 593),
+            (473, 593),
+            (558, 593),
+            (644, 593),
+            (731, 593),
+            (817, 593),
+        ]
+
+        return [
+            (int(x + w * px / reference_w), int(y + h * py / reference_h))
+            for px, py in reference_points
+        ]
+
+    def kebineng_hand_card_region(self, screen=None):
+        game_region = self.game_search_region(screen)
+
+        if game_region is None:
+            return None
+
+        x, y, w, h = game_region
+        left = x + int(w * 0.04)
+        top = y + int(h * 0.76)
+        right = x + int(w * 0.76)
+        bottom = y + h
+
+        if right <= left or bottom <= top:
+            return None
+
+        return left, top, right - left, bottom - top
+
+    def detect_kebineng_hand_card_points(self):
+        """
+        每次出牌前重新识别当前手牌卡位。
+
+        牌面每局都会变，不能依赖固定卡牌模板；这里只检测底部手牌区域
+        连续的卡牌亮色区域，再按当前宽度估算卡位中心。
+        """
+        screen = self.screenshot_bgr()
+        region = self.kebineng_hand_card_region(screen)
+
+        if region is None:
+            return []
+
+        x, y, w, h = region
+        roi = screen[y:y + h, x:x + w]
+
+        if roi.size == 0:
+            return []
+
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+
+        light_mask = gray > 135
+        paper_mask = (hsv[:, :, 1] < 85) & (gray > 80)
+        mask = np.where(light_mask | paper_mask, 255, 0).astype(np.uint8)
+
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 9))
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel, iterations=1)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, open_kernel, iterations=1)
+
+        projection = (mask > 0).sum(axis=0)
+        active_threshold = max(12, int(h * 0.22))
+        active = projection > active_threshold
+
+        segments = []
+        in_segment = False
+        start = 0
+
+        for index, is_active in enumerate(active):
+            if is_active and not in_segment:
+                start = index
+                in_segment = True
+            elif not is_active and in_segment:
+                if index - start >= 20:
+                    segments.append((start, index - 1))
+                in_segment = False
+
+        if in_segment and len(active) - start >= 20:
+            segments.append((start, len(active) - 1))
+
+        merged_segments = []
+
+        for start, end in segments:
+            if merged_segments and start - merged_segments[-1][1] <= 18:
+                last_start, _ = merged_segments[-1]
+                merged_segments[-1] = (last_start, end)
+            else:
+                merged_segments.append((start, end))
+
+        game_region = self.game_search_region(screen)
+        game_w = w if game_region is None else game_region[2]
+        card_pitch = max(55, min(105, int(game_w * 86 / 1159)))
+        card_y = y + int(h * 0.70)
+        points = []
+
+        for start, end in merged_segments:
+            segment_w = end - start + 1
+
+            if segment_w < 24:
+                continue
+
+            count = max(1, int(round(segment_w / card_pitch)))
+            count = min(count, 12)
+            pitch = segment_w / count
+
+            for index in range(count):
+                card_x = int(x + start + pitch * (index + 0.5))
+                points.append((card_x, card_y))
+
+        final_points = []
+
+        for card_x, card_y in sorted(points):
+            if not final_points or abs(card_x - final_points[-1][0]) > 35:
+                final_points.append((card_x, card_y))
+
+        return final_points
+
+    def detect_kebineng_card_marker_points(self):
+        region = self.kebineng_hand_card_region()
+        found = self.find_all_templates(
+            "kebineng_card_marker.png",
+            threshold=max(self.settings.THRESH_CARD, 0.70),
+            region=region,
+            min_distance=45,
+            allow_supervision=False
+        )
+
+        points = []
+
+        for marker_x, marker_y, conf in sorted(found):
+            card_x = int(marker_x)
+            card_y = int(marker_y - 30)
+            points.append((card_x, card_y, conf))
+
+        return points
+
+    def choose_kebineng_hand_card_point(self, rejected_xs):
+        marker_points = self.detect_kebineng_card_marker_points()
+
+        if marker_points:
+            points = [(x, y) for x, y, _ in marker_points]
+            source = "寇旌杀模板识别"
+        else:
+            points = self.detect_kebineng_hand_card_points()
+            source = "截图识别"
+
+        if not points:
+            anchor = self.kebineng_last_select_all_anchor
+
+            if anchor is not None:
+                points = self.kebineng_card_points_from_anchor(*anchor)
+                source = "锚点兜底"
+            else:
+                points = self.kebineng_card_points_from_anchor()
+                source = "固定兜底"
+
+        if not points:
+            return None, [], source
+
+        for point in points:
+            if all(abs(point[0] - rejected_x) > 35 for rejected_x in rejected_xs):
+                return point, points, source
+
+        return None, points, source
+
+    def detect_victory_quiet(self, context):
+        found = self.find_template_quiet(
+            "victory.png",
+            threshold=self.settings.THRESH_VICTORY
+        )
+
+        if found is None:
+            return False
+
+        x, y, conf = found
+        self.log(f"{context}：检测到 victory.png | 置信度={conf:.3f} | 坐标=({x}, {y})")
+        return True
+
+    def detect_current_general_skill_quiet(self, context, region=None):
+        template_name = self.general_profile.skill_template
+        threshold = getattr(self.settings, self.general_profile.skill_threshold_name)
+
+        found = self.find_template_quiet(
+            template_name,
+            threshold=threshold,
+            region=region
+        )
+
+        if found is None:
+            return False
+
+        x, y, conf = found
+        self.log(f"{context}：检测到 {template_name} | 置信度={conf:.3f} | 坐标=({x}, {y})")
+        return True
+
+    def handle_kebineng_koujing_prompt(self):
+        prompt_region = self.skill_popup_search_region()
+
+        found = self.wait_template(
+            "koujing.png",
+            threshold=getattr(self.settings, self.general_profile.skill_threshold_name),
+            timeout=8,
+            region=prompt_region,
+            desc="轲比能-寇旌"
+        )
+
+        if found is None:
+            self.log("轲比能出牌阶段：没有检测到寇旌提示")
+            return None
+
+        all_region = self.bottom_right_action_region()
+        select_all_rect = self.wait_template_rect(
+            "select_all.png",
+            threshold=max(self.settings.THRESH_BUTTON, 0.60),
+            timeout=3,
+            region=all_region,
+            desc="寇旌-全选"
+        )
+
+        if select_all_rect is None:
+            self.log("轲比能出牌阶段失败：没有找到 select_all.png")
+            return None
+
+        all_left, all_top, all_w, all_h, all_conf = select_all_rect
+        all_x = int(all_left + max(4, all_w * 0.25))
+        all_y = int(all_top + all_h * 0.50)
+        self.log(
+            f"轲比能出牌阶段：点击全选 | "
+            f"置信度={all_conf:.3f} | 点击坐标=({all_x}, {all_y}) | "
+            f"模板区域=({all_left}, {all_top}, {all_w}, {all_h}) | 搜索区域={all_region}"
+        )
+        self.safe_click(all_x, all_y, jitter=1)
+
+        self.log("轲比能出牌阶段：已点击全选，不做状态二次确认，直接点击确定")
+
+        if not self.wait_and_click_template(
+            "confirm.png",
+            threshold=self.settings.THRESH_CONFIRM,
+            timeout=3,
+            region=self.popup_confirm_region(found[0], found[1]),
+            desc="寇旌-确认"
+        ):
+            self.log("轲比能出牌阶段失败：全选后没有找到 confirm.png")
+            return None
+
+        self.log("轲比能出牌阶段：寇旌全选确认完成")
+        time.sleep(0.8)
+        self.kebineng_last_select_all_anchor = (all_x, all_y)
+        return all_x, all_y
+
+    def try_kebineng_play_one_card(self, card_x, card_y):
+        self.log(f"轲比能出牌阶段：点击手牌坐标=({card_x}, {card_y})")
+        self.safe_click(card_x, card_y, jitter=2)
+
+        select_found = self.wait_any_template(
+            ["select_figure.png", "select_figure_2.png"],
+            threshold=self.settings.THRESH_SMALL,
+            timeout=1.5,
+            desc="轲比能-选择目标"
+        )
+
+        if select_found is None:
+            self.log("轲比能出牌阶段：未检测到选择目标提示，仍尝试点击李傕")
+
+        if not self.click_template(
+            "lijue.png",
+            threshold=self.settings.THRESH_BOSS,
+            desc="轲比能-选择李傕"
+        ):
+            self.log("轲比能出牌阶段：点击手牌后没有找到 lijue.png")
+            self.handle_cancel_only()
+            return "no_target"
+
+        if not self.wait_and_click_template(
+            "confirm.png",
+            threshold=self.settings.THRESH_CONFIRM,
+            timeout=2.5,
+            desc="轲比能-选择李傕后确认"
+        ):
+            self.log("轲比能出牌阶段：点击李傕后没有找到 confirm.png")
+            self.handle_cancel_only()
+            return "no_confirm"
+
+        self.log("轲比能出牌阶段：已出一张手牌并确认李傕")
+        self.log("轲比能出牌阶段：等待 2 秒过场动画")
+        time.sleep(2.0)
+        self.handle_after_lijue_prompts(duration=1.5)
+        self.handle_save_by_cancel()
+        return "played"
+
     # =========================================================
     # 阶段函数：确定流程
     # =========================================================
@@ -1501,6 +1889,13 @@ class GameBot:
 
         select_template = self.general_profile.select_template
 
+        if not select_template:
+            self.log(
+                f"胜利后重新选将失败：{self.general_profile.name} "
+                "缺少选将搜索结果模板，暂不能自动重新选将"
+            )
+            return False
+
         if not self.click_template(
             select_template,
             threshold=self.settings.THRESH_BUTTON,
@@ -1539,6 +1934,21 @@ class GameBot:
 
     def battle_phase_change_cards(self):
         self.log("执行牌局阶段①：换牌阶段")
+
+        if getattr(self.general_profile, "change_card_strategy", "standard") == "cancel_only":
+            self.log(f"换牌阶段：{self.general_profile.name} 不检测【杀】数量，直接点击取消")
+            cancel_ok = self.click_template(
+                "cancel.png",
+                threshold=self.settings.THRESH_BUTTON,
+                desc="换牌阶段-直接取消"
+            )
+
+            if not cancel_ok:
+                self.log("换牌阶段失败：直接取消时没有找到 cancel.png")
+                return False
+
+            self.log("换牌阶段完成：已直接点击取消")
+            return True
 
         attack_count, _ = self.count_template(
             "attack.png",
@@ -1607,6 +2017,10 @@ class GameBot:
 
         self.log(f"执行牌局阶段②：武将技能阶段（{self.general_profile.name}）")
 
+        if getattr(self.general_profile, "attack_strategy", "standard") == "kebineng":
+            self.log("轲比能的寇旌选择在出牌阶段处理，本阶段跳过")
+            return True
+
         return self.click_template(
             template_name,
             threshold=threshold,
@@ -1622,6 +2036,10 @@ class GameBot:
         target_template = self.general_profile.target_template
 
         self.log(f"执行牌局阶段③：将灵技能阶段（{self.spirit_profile.name}）")
+
+        if not template_name or not self.spirit_profile.prompt_threshold_name:
+            self.log(f"{self.spirit_profile.name} 无将灵技能触发，本阶段跳过")
+            return True
 
         require_found = self.detect_require_prompt()
 
@@ -1707,6 +2125,160 @@ class GameBot:
     # =========================================================
 
     def battle_phase_attack(self):
+        if getattr(self.general_profile, "attack_strategy", "standard") == "kebineng":
+            return self.battle_phase_attack_kebineng()
+
+        return self.battle_phase_attack_standard()
+
+    def battle_phase_attack_kebineng(self, require_koujing=True, allow_next_turn=True):
+        self.log("执行牌局阶段④：出牌阶段（轲比能）")
+
+        anchor = None
+
+        if require_koujing:
+            anchor = self.handle_kebineng_koujing_prompt()
+
+        if require_koujing and anchor is None:
+            if self.detect_victory_quiet("轲比能出牌阶段"):
+                return "victory"
+
+            clear_result = self.clear_cancel_until_acquire(timeout=30)
+
+            if clear_result == "next_turn":
+                return "next_turn"
+
+            if clear_result == "victory":
+                return "victory"
+
+            return "failed"
+
+        if not require_koujing:
+            self.log("轲比能出牌阶段：跳过寇旌/全选，直接按手牌坐标出牌")
+            anchor = self.kebineng_last_select_all_anchor
+
+        rejected_card_xs = []
+        miss_count = 0
+        max_card_attempts = 36
+
+        for attempt in range(1, max_card_attempts + 1):
+            if self.stop_flag:
+                self.log("轲比能出牌阶段中止")
+                return "failed"
+
+            if self.paused:
+                time.sleep(0.2)
+                continue
+
+            if self.detect_victory_quiet("轲比能出牌阶段"):
+                return "victory"
+
+            if allow_next_turn:
+                prompt_region = self.skill_popup_search_region()
+                if self.detect_current_general_skill_quiet("轲比能出牌阶段", region=prompt_region):
+                    self.log("轲比能出牌阶段：检测到下一轮寇旌提示")
+                    return "next_turn"
+
+            card_point, card_points, point_source = self.choose_kebineng_hand_card_point(rejected_card_xs)
+
+            if card_point is None:
+                self.log(
+                    f"轲比能出牌阶段：{point_source} 没有可用手牌坐标，"
+                    f"已识别候选={card_points}"
+                )
+
+                if self.detect_victory_quiet("轲比能出牌阶段"):
+                    return "victory"
+
+                if not allow_next_turn:
+                    rejected_card_xs = []
+                    time.sleep(0.6)
+                    continue
+
+                clear_result = self.clear_cancel_until_acquire(timeout=30)
+
+                if clear_result == "next_turn":
+                    self.log("轲比能出牌阶段完成：已进入下一轮寇旌")
+                    return "next_turn"
+
+                if clear_result == "victory":
+                    self.log("轲比能出牌阶段完成：清理阶段检测到胜利")
+                    return "victory"
+
+                if clear_result == "stopped":
+                    self.log("轲比能出牌阶段中止")
+                    return "failed"
+
+                rejected_card_xs = []
+                continue
+
+            card_x, card_y = card_point
+            self.log(
+                f"轲比能出牌阶段：第 {attempt} 次尝试出牌 | "
+                f"{point_source}到 {len(card_points)} 个手牌坐标 | "
+                f"选择=({card_x}, {card_y}) | 候选={card_points}"
+            )
+
+            result = self.try_kebineng_play_one_card(card_x, card_y)
+
+            if result == "played":
+                rejected_card_xs = []
+                miss_count = 0
+                self.log("轲比能出牌阶段：本次出牌成功，下次重新识别当前手牌")
+                continue
+
+            rejected_card_xs.append(card_x)
+            miss_count += 1
+
+            if miss_count >= len(card_points):
+                self.log("轲比能出牌阶段：一轮候选手牌都未成功，开始检测胜利或下一轮")
+
+                if self.detect_victory_quiet("轲比能出牌阶段"):
+                    return "victory"
+
+                if not allow_next_turn:
+                    self.log("轲比能出牌阶段：当前为直接出牌轮，休息后继续尝试候选手牌")
+                    rejected_card_xs = []
+                    miss_count = 0
+                    time.sleep(0.6)
+                    continue
+
+                clear_result = self.clear_cancel_until_acquire(timeout=30)
+
+                if clear_result == "next_turn":
+                    self.log("轲比能出牌阶段完成：已进入下一轮寇旌")
+                    return "next_turn"
+
+                if clear_result == "victory":
+                    self.log("轲比能出牌阶段完成：清理阶段检测到胜利")
+                    return "victory"
+
+                if clear_result == "stopped":
+                    self.log("轲比能出牌阶段中止")
+                    return "failed"
+
+                self.log("轲比能出牌阶段：清理阶段未检测到胜利或下一轮，继续尝试")
+                rejected_card_xs = []
+                miss_count = 0
+
+        if self.detect_victory_quiet("轲比能出牌阶段"):
+            return "victory"
+
+        if not allow_next_turn:
+            self.log("轲比能出牌阶段失败：直接出牌轮达到最大出牌尝试次数")
+            return "failed"
+
+        clear_result = self.clear_cancel_until_acquire(timeout=30)
+
+        if clear_result == "next_turn":
+            return "next_turn"
+
+        if clear_result == "victory":
+            return "victory"
+
+        self.log("轲比能出牌阶段失败：达到最大出牌尝试次数")
+        return "failed"
+
+    def battle_phase_attack_standard(self):
         target_template = self.general_profile.target_template
 
         self.log("执行牌局阶段④：出牌阶段")
@@ -1832,6 +2404,9 @@ class GameBot:
     # =========================================================
 
     def run_battle_until_victory(self, start_with_acquire=True, max_turns=30):
+        if getattr(self.general_profile, "attack_strategy", "standard") == "kebineng":
+            return self.run_battle_until_victory_kebineng(max_turns=max_turns)
+
         self.log("开始执行牌局循环：直到胜利或停止")
 
         turn_id = 0
@@ -1885,6 +2460,45 @@ class GameBot:
         self.log(f"牌局循环结束：超过最大轮数 {max_turns}")
         return "timeout"
 
+    def run_battle_until_victory_kebineng(self, max_turns=30, require_koujing=True):
+        self.log("开始执行轲比能牌局循环：直到胜利或停止")
+
+        turn_id = 0
+
+        while not self.stop_flag and turn_id < max_turns:
+            turn_id += 1
+            self.log(f"========== 轲比能牌局循环：第 {turn_id} 轮 ==========")
+
+            if self.stage_check_victory():
+                self.log("轲比能牌局循环：检测到胜利")
+                return "victory"
+
+            if require_koujing:
+                self.log("轲比能牌局循环：第一轮进入寇旌出牌阶段")
+            else:
+                self.log("轲比能牌局循环：跳过武将/将灵技能阶段，直接出牌")
+
+            attack_result = self.battle_phase_attack_kebineng(
+                require_koujing=require_koujing,
+                allow_next_turn=require_koujing
+            )
+
+            if attack_result == "victory":
+                self.log("轲比能牌局循环：出牌阶段检测到胜利")
+                return "victory"
+
+            if attack_result == "next_turn":
+                self.log("轲比能牌局循环：进入后续直接出牌轮")
+                require_koujing = False
+                continue
+
+            if attack_result == "failed":
+                self.log("轲比能牌局循环中断：出牌阶段失败")
+                return "failed"
+
+        self.log(f"轲比能牌局循环结束：超过最大轮数 {max_turns}")
+        return "timeout"
+
     def battle_phase_attack_and_continue(self):
         self.log(f"执行出牌阶段，并在检测到 {self.general_profile.skill_template} 后继续后续轮次")
 
@@ -1896,6 +2510,13 @@ class GameBot:
 
         if attack_result == "next_turn":
             self.log(f"出牌阶段连续流程：检测到 {self.general_profile.skill_template}，继续执行下一轮")
+            if getattr(self.general_profile, "attack_strategy", "standard") == "kebineng":
+                result = self.run_battle_until_victory_kebineng(
+                    max_turns=30,
+                    require_koujing=False
+                )
+                return result == "victory"
+
             result = self.run_battle_until_victory(max_turns=30)
             return result == "victory"
 

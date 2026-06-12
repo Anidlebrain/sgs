@@ -13,7 +13,9 @@ else:
 TEMPLATE_DIR = BASE_DIR / "templates"
 DEBUG_DIR = BASE_DIR / "debug_screens"
 LEARNED_TEMPLATE_DIR = BASE_DIR / "learned_templates"
+LOG_DIR = BASE_DIR / "logs"
 SETTINGS_FILE = BASE_DIR / "settings.json"
 
 DEBUG_DIR.mkdir(exist_ok=True)
 LEARNED_TEMPLATE_DIR.mkdir(exist_ok=True)
+LOG_DIR.mkdir(exist_ok=True)
