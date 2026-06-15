@@ -61,6 +61,31 @@ class GameBot:
         now = datetime.now().strftime("%H:%M:%S")
         self.log_func(f"[{now}] {text}")
 
+    def request_stop(self, reason=None):
+        if reason and not self.stop_flag:
+            self.log(reason)
+
+        self.stop_flag = True
+        self.running = False
+
+    def check_stop_requested(self):
+        if self.stop_flag:
+            return True
+
+        try:
+            x, y = pyautogui.position()
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            return True
+        except Exception:
+            return self.stop_flag
+
+        if x <= 0 and y <= 0:
+            self.request_stop("检测到鼠标位于左上角，脚本停止")
+            return True
+
+        return self.stop_flag
+
     # -------------------------
     # 暂停辅助
     # -------------------------
@@ -69,7 +94,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < seconds:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 return False
 
             if self.paused:
@@ -85,11 +110,19 @@ class GameBot:
     # -------------------------
 
     def move_mouse_to_center(self):
+        if self.check_stop_requested():
+            return False
+
         try:
             w, h = pyautogui.size()
             pyautogui.moveTo(w // 2, h // 2, duration=0.08)
+            return True
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            return False
         except Exception as e:
             self.log(f"鼠标回中失败：{e}")
+            return False
 
     def minimize_ui_window(self):
         """
@@ -102,8 +135,10 @@ class GameBot:
 
         try:
             self.minimize_func()
-            time.sleep(0.5)
-            return True
+            return self.sleep_with_pause(0.5)
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            return False
         except Exception as e:
             self.log(f"最小化 UI 失败：{e}")
             return False
@@ -144,6 +179,9 @@ class GameBot:
 
         try:
             windows = pyautogui.getAllWindows()
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            return False
         except Exception as e:
             self.log(f"获取窗口列表失败：{e}")
             return False
@@ -176,22 +214,29 @@ class GameBot:
                 # 最大化窗口必须先还原，否则 resizeTo 可能无效
                 if getattr(win, "isMaximized", False):
                     win.restore()
-                    time.sleep(0.3)
+                    if not self.sleep_with_pause(0.3):
+                        return False
 
                 # 最小化窗口也先还原
                 if getattr(win, "isMinimized", False):
                     win.restore()
-                    time.sleep(0.3)
+                    if not self.sleep_with_pause(0.3):
+                        return False
 
                 if move_to_left_top:
                     win.moveTo(0, 0)
-                    time.sleep(0.15)
+                    if not self.sleep_with_pause(0.15):
+                        return False
 
                 win.resizeTo(width, height)
-                time.sleep(0.25)
+                if not self.sleep_with_pause(0.25):
+                    return False
 
                 changed_count += 1
 
+            except pyautogui.FailSafeException:
+                self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+                return False
             except Exception as e:
                 self.log(f"调整窗口失败：{title} | {e}")
 
@@ -207,7 +252,15 @@ class GameBot:
     # -------------------------
 
     def screenshot_bgr(self):
-        img = pyautogui.screenshot()
+        if self.check_stop_requested():
+            raise pyautogui.FailSafeException("stop requested")
+
+        try:
+            img = pyautogui.screenshot()
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            raise
+
         img = np.array(img)
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         return img
@@ -440,6 +493,9 @@ class GameBot:
         }
 
     def _best_template_match(self, template_name, region=None, screen=None):
+        if self.check_stop_requested():
+            return None
+
         if screen is None:
             screen = self.screenshot_bgr()
 
@@ -725,21 +781,25 @@ class GameBot:
         threshold=None,
         region=None,
         min_distance=20,
-        allow_supervision=True
+        allow_supervision=True,
+        return_best=False
     ):
         if threshold is None:
             threshold = self.settings.DEFAULT_THRESHOLD
+
+        if self.check_stop_requested():
+            return ([], None) if return_best else []
 
         screen = self.screenshot_bgr()
         variants = self.load_template_variants(template_name)
 
         if not variants:
-            return []
+            return ([], None) if return_best else []
 
         search_img, offset_x, offset_y = self._search_area(screen, region)
 
         if search_img.size == 0:
-            return []
+            return ([], None) if return_best else []
 
         candidates = []
         best = None
@@ -793,6 +853,9 @@ class GameBot:
             if not too_close:
                 final_points.append((cx, cy, conf))
 
+        if return_best:
+            return final_points, best
+
         return final_points
 
     def count_template(self, template_name, threshold=None, region=None):
@@ -815,7 +878,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，停止等待")
                 return None
 
@@ -875,15 +938,24 @@ class GameBot:
     # -------------------------
 
     def safe_click(self, x, y, jitter=3):
+        if self.check_stop_requested():
+            return False
+
         with self.click_lock:
             rx = x + random.randint(-jitter, jitter)
             ry = y + random.randint(-jitter, jitter)
 
-            pyautogui.moveTo(rx, ry, duration=random.uniform(0.05, 0.15))
-            pyautogui.click()
+            try:
+                pyautogui.moveTo(rx, ry, duration=random.uniform(0.05, 0.15))
+                pyautogui.click()
+            except pyautogui.FailSafeException:
+                self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+                return False
 
-            time.sleep(self.settings.CLICK_SLEEP)
-            self.move_mouse_to_center()
+            if not self.sleep_with_pause(self.settings.CLICK_SLEEP):
+                return False
+
+            return self.move_mouse_to_center()
 
     def click_template(self, template_name, threshold=None, region=None, desc=None):
         found = self.find_template(template_name, threshold, region)
@@ -901,7 +973,9 @@ class GameBot:
         )
         self.log_if_top_right_click(desc or template_name, x, y, conf, source_text)
 
-        self.safe_click(x, y)
+        if not self.safe_click(x, y):
+            return False
+
         return True
 
     def wait_template(self, template_name, threshold=None, timeout=5, region=None, desc=None):
@@ -913,7 +987,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，停止等待")
                 return None
 
@@ -946,7 +1020,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，停止等待")
                 return None
 
@@ -979,7 +1053,9 @@ class GameBot:
         x, y, conf = found
         source_text = self.get_last_match_source_text(template_name)
         self.log_if_top_right_click(desc or template_name, x, y, conf, source_text)
-        self.safe_click(x, y)
+        if not self.safe_click(x, y):
+            return False
+
         self.log(f"等待后点击：{desc or template_name} | 坐标=({x}, {y}) | {source_text}")
         return True
 
@@ -987,14 +1063,22 @@ class GameBot:
     # 特殊弹窗处理
     # -------------------------
 
+    def should_handle_xiaorui(self):
+        return getattr(self.spirit_profile, "key", None) == "cao_chun"
+
     def handle_after_lijue_prompts(self, duration=3.0):
-        self.log(f"持续检测 increase_damage.png / xiaorui.png，最长 {duration} 秒")
+        popup_names = ["increase_damage.png"]
+
+        if self.should_handle_xiaorui():
+            popup_names.append("xiaorui.png")
+
+        self.log(f"持续检测 {' / '.join(popup_names)}，最长 {duration} 秒")
 
         start = time.time()
         handled_any = False
 
         while time.time() - start < duration:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 return handled_any
 
             if self.paused:
@@ -1006,15 +1090,18 @@ class GameBot:
             if self.handle_increase_damage():
                 handled = True
                 handled_any = True
-                time.sleep(0.4)
+                if not self.sleep_with_pause(0.4):
+                    return handled_any
 
-            if self.handle_xiaorui():
+            if self.should_handle_xiaorui() and self.handle_xiaorui():
                 handled = True
                 handled_any = True
-                time.sleep(0.4)
+                if not self.sleep_with_pause(0.4):
+                    return handled_any
 
             if not handled:
-                time.sleep(0.2)
+                if not self.sleep_with_pause(0.2):
+                    return handled_any
 
         return handled_any
 
@@ -1063,6 +1150,9 @@ class GameBot:
         return False
 
     def handle_xiaorui(self):
+        if not self.should_handle_xiaorui():
+            return False
+
         now = time.time()
 
         if now - self.xiaorui_last_click_time < 0.8:
@@ -1165,7 +1255,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < victory_timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log(f"{context}：收到停止信号，停止等待 victory.png")
                 return "stopped"
 
@@ -1237,7 +1327,7 @@ class GameBot:
         timeout = 6
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log(f"收到停止信号，停止等待 {target_template}")
                 return "stopped"
 
@@ -1277,13 +1367,16 @@ class GameBot:
 
         self.log(f"先点击头部位置=({head_x}, {head_y})")
         self.log_if_top_right_click(f"{target_template}-头部位置", head_x, head_y, conf)
-        self.safe_click(head_x, head_y, jitter=2)
+        if not self.safe_click(head_x, head_y, jitter=2):
+            return "stopped"
 
-        time.sleep(0.4)
+        if not self.sleep_with_pause(0.4):
+            return "stopped"
 
         self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
         self.log_if_top_right_click(f"{target_template}-胸部位置", chest_x, chest_y, conf)
-        self.safe_click(chest_x, chest_y, jitter=2)
+        if not self.safe_click(chest_x, chest_y, jitter=2):
+            return "stopped"
 
         return "handled"
 
@@ -1310,7 +1403,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log(f"收到停止信号，停止等待出杀后的 {target_template}")
                 return "stopped"
 
@@ -1339,13 +1432,16 @@ class GameBot:
 
                 self.log(f"先点击头部位置=({head_x}, {head_y})")
                 self.log_if_top_right_click(f"出杀后 {target_template}-头部位置", head_x, head_y, conf)
-                self.safe_click(head_x, head_y, jitter=2)
+                if not self.safe_click(head_x, head_y, jitter=2):
+                    return "stopped"
 
-                time.sleep(0.4)
+                if not self.sleep_with_pause(0.4):
+                    return "stopped"
 
                 self.log(f"再点击胸部位置=({chest_x}, {chest_y})")
                 self.log_if_top_right_click(f"出杀后 {target_template}-胸部位置", chest_x, chest_y, conf)
-                self.safe_click(chest_x, chest_y, jitter=2)
+                if not self.safe_click(chest_x, chest_y, jitter=2):
+                    return "stopped"
 
                 return "handled"
 
@@ -1363,7 +1459,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，停止等待胜利")
                 return "stopped"
 
@@ -1405,7 +1501,7 @@ class GameBot:
         start = time.time()
 
         while time.time() - start < timeout:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，退出下一轮清理阶段")
                 return "stopped"
 
@@ -1459,6 +1555,123 @@ class GameBot:
         top = y + int(h * 0.70)
         region = left, top, x + w - left, y + h - top
         return self.intersect_regions(region, game_region)
+
+    def kebineng_select_all_region(self):
+        game_region = self.game_search_region()
+
+        if game_region is None:
+            return None
+
+        x, y, w, h = game_region
+        left = x + int(w * 0.58)
+        top = y + int(h * 0.68)
+        right = x + int(w * 0.82)
+        bottom = y + h
+
+        if right <= left or bottom <= top:
+            return None
+
+        return self.intersect_regions((left, top, right - left, bottom - top), game_region)
+
+    def kebineng_select_all_fallback_point(self, region=None):
+        if region is not None:
+            x, y, w, h = region
+            return int(x + w * 0.424), int(y + h * 0.638)
+
+        game_region = self.game_search_region()
+
+        if game_region is not None:
+            x, y, w, h = game_region
+            return int(x + w * 0.681), int(y + h * 0.884)
+
+        return 913, 760
+
+    def wait_kebineng_select_all_point(self, timeout=3):
+        threshold = self.settings.THRESH_SELECT_ALL
+        region = self.kebineng_select_all_region()
+        fallback_x, fallback_y = self.kebineng_select_all_fallback_point(region)
+
+        self.log(f"等待出现：寇旌-全选，最长 {timeout} 秒")
+
+        start = time.time()
+        best_seen = None
+        rejected_seen = []
+        safe_max_x = None
+
+        if region is not None:
+            safe_max_x = region[0] + int(region[2] * 0.56)
+
+        while time.time() - start < timeout:
+            if self.check_stop_requested():
+                self.log("收到停止信号，停止等待全选")
+                return None
+
+            if self.paused:
+                time.sleep(0.2)
+                continue
+
+            candidates, best = self.find_all_templates(
+                "select_all.png",
+                threshold=threshold,
+                region=region,
+                min_distance=25,
+                allow_supervision=False,
+                return_best=True
+            )
+
+            if best is not None and (best_seen is None or best["conf"] > best_seen["conf"]):
+                best_seen = best
+
+            if candidates:
+                safe_candidates = candidates
+
+                if safe_max_x is not None:
+                    safe_candidates = [
+                        candidate for candidate in candidates
+                        if candidate[0] <= safe_max_x
+                    ]
+                    rejected_seen = [
+                        candidate for candidate in candidates
+                        if candidate[0] > safe_max_x
+                    ]
+
+                if not safe_candidates:
+                    time.sleep(0.2)
+                    continue
+
+                # “整理手牌”紧挨在全选右侧，且会形成相似候选；取最左侧可避开它。
+                all_x, all_y, all_conf = min(safe_candidates, key=lambda item: (item[0], -item[2]))
+                self.log(
+                    f"已出现：寇旌-全选 | 候选数={len(candidates)} | "
+                    f"安全候选数={len(safe_candidates)} | 右侧安全线x={safe_max_x} | "
+                    f"选择最左候选=({all_x}, {all_y}) | 置信度={all_conf:.3f} | 搜索区域={region}"
+                )
+                return all_x, all_y, all_conf, region, "模板识别"
+
+            time.sleep(0.2)
+
+        if best_seen is None:
+            self.log(
+                f"等待超时：寇旌-全选 | 没有任何匹配结果 | "
+                f"阈值={threshold:.3f} | 右侧安全线x={safe_max_x} | 搜索区域={region}"
+            )
+        else:
+            best_x = best_seen["x"] + best_seen["w"] // 2
+            best_y = best_seen["y"] + best_seen["h"] // 2
+            source = (best_seen.get("variant") or {}).get("label", "select_all.png")
+            self.log(
+                f"等待超时：寇旌-全选 | 最高置信度={best_seen['conf']:.3f} | "
+                f"阈值={threshold:.3f} | 最佳坐标=({best_x}, {best_y}) | "
+                f"最佳来源={source} | 右侧安全线x={safe_max_x} | "
+                f"被过滤候选={rejected_seen} | 搜索区域={region}"
+            )
+
+        self.log(
+            f"寇旌-全选：使用兜底坐标=({fallback_x}, {fallback_y}) | "
+            "原因=未识别到安全全选候选"
+        )
+        return fallback_x, fallback_y, 0.0, region, "兜底坐标"
+
 
     def kebineng_card_points_from_anchor(self, anchor_x=None, anchor_y=None):
         """
@@ -1616,7 +1829,7 @@ class GameBot:
         region = self.kebineng_hand_card_region()
         found = self.find_all_templates(
             "kebineng_card_marker.png",
-            threshold=max(self.settings.THRESH_CARD, 0.70),
+            threshold=self.settings.THRESH_KEBINENG_CARD_MARKER,
             region=region,
             min_distance=45,
             allow_supervision=False
@@ -1705,28 +1918,22 @@ class GameBot:
             self.log("轲比能出牌阶段：没有检测到寇旌提示")
             return None
 
-        all_region = self.bottom_right_action_region()
-        select_all_rect = self.wait_template_rect(
-            "select_all.png",
-            threshold=max(self.settings.THRESH_BUTTON, 0.60),
-            timeout=3,
-            region=all_region,
-            desc="寇旌-全选"
-        )
+        select_all_point = self.wait_kebineng_select_all_point(timeout=3)
 
-        if select_all_rect is None:
+        if select_all_point is None:
             self.log("轲比能出牌阶段失败：没有找到 select_all.png")
             return None
 
-        all_left, all_top, all_w, all_h, all_conf = select_all_rect
-        all_x = int(all_left + max(4, all_w * 0.25))
-        all_y = int(all_top + all_h * 0.50)
+        all_x, all_y, all_conf, all_region, all_source = select_all_point
+        conf_text = f"{all_conf:.3f}" if all_source != "兜底坐标" else "兜底"
         self.log(
             f"轲比能出牌阶段：点击全选 | "
-            f"置信度={all_conf:.3f} | 点击坐标=({all_x}, {all_y}) | "
-            f"模板区域=({all_left}, {all_top}, {all_w}, {all_h}) | 搜索区域={all_region}"
+            f"来源={all_source} | 置信度={conf_text} | 点击坐标=({all_x}, {all_y}) | "
+            f"搜索区域={all_region}"
         )
-        self.safe_click(all_x, all_y, jitter=1)
+
+        if not self.safe_click(all_x, all_y, jitter=0):
+            return None
 
         self.log("轲比能出牌阶段：已点击全选，不做状态二次确认，直接点击确定")
 
@@ -1741,13 +1948,17 @@ class GameBot:
             return None
 
         self.log("轲比能出牌阶段：寇旌全选确认完成")
-        time.sleep(0.8)
+        if not self.sleep_with_pause(0.8):
+            return None
+
         self.kebineng_last_select_all_anchor = (all_x, all_y)
         return all_x, all_y
 
     def try_kebineng_play_one_card(self, card_x, card_y):
         self.log(f"轲比能出牌阶段：点击手牌坐标=({card_x}, {card_y})")
-        self.safe_click(card_x, card_y, jitter=2)
+
+        if not self.safe_click(card_x, card_y, jitter=2):
+            return "stopped"
 
         select_found = self.wait_any_template(
             ["select_figure.png", "select_figure_2.png"],
@@ -1780,8 +1991,14 @@ class GameBot:
 
         self.log("轲比能出牌阶段：已出一张手牌并确认李傕")
         self.log("轲比能出牌阶段：等待 2 秒过场动画")
-        time.sleep(2.0)
+        if not self.sleep_with_pause(2.0):
+            return "stopped"
+
         self.handle_after_lijue_prompts(duration=1.5)
+
+        if self.check_stop_requested():
+            return "stopped"
+
         self.handle_save_by_cancel()
         return "played"
 
@@ -1844,7 +2061,8 @@ class GameBot:
             self.log("胜利后重新选将失败：没有找到 cancel_2.png")
             return False
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return False
 
         if not self.click_template(
             "war.png",
@@ -1854,7 +2072,8 @@ class GameBot:
             self.log("胜利后重新选将失败：没有找到 war.png")
             return False
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return False
 
         if not self.click_template(
             "add_hero.png",
@@ -1864,12 +2083,14 @@ class GameBot:
             self.log("胜利后重新选将失败：没有找到 add_hero.png")
             return False
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return False
 
         self.log("准备最小化 UI，避免遮挡 search.png")
         self.minimize_ui_window()
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return False
 
         if not self.click_template(
             "search.png",
@@ -1879,15 +2100,29 @@ class GameBot:
             self.log("胜利后重新选将失败：没有找到 search.png")
             return False
 
-        time.sleep(0.3)
+        if not self.sleep_with_pause(0.3):
+            return False
 
         self.log(f"搜索框输入：{self.general_profile.name}（{self.general_profile.search_text.strip()}）")
-        pyautogui.write(self.general_profile.search_text, interval=0.03)
-        pyautogui.press("enter")
+        if self.check_stop_requested():
+            return False
 
-        time.sleep(0.5)
+        try:
+            pyautogui.write(self.general_profile.search_text, interval=0.03)
+            pyautogui.press("enter")
+        except pyautogui.FailSafeException:
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            return False
+
+        if not self.sleep_with_pause(0.5):
+            return False
 
         select_template = self.general_profile.select_template
+        select_threshold = getattr(
+            self.settings,
+            self.general_profile.select_threshold_name,
+            self.settings.THRESH_BUTTON
+        )
 
         if not select_template:
             self.log(
@@ -1898,13 +2133,14 @@ class GameBot:
 
         if not self.click_template(
             select_template,
-            threshold=self.settings.THRESH_BUTTON,
+            threshold=select_threshold,
             desc=self.general_profile.select_desc
         ):
             self.log(f"胜利后重新选将失败：没有找到 {select_template}")
             return False
 
-        time.sleep(0.8)
+        if not self.sleep_with_pause(0.8):
+            return False
 
         self.log("胜利后重新选将流程完成，重新调用开始挑战")
         return self.stage_start_challenge(
@@ -1982,7 +2218,8 @@ class GameBot:
             self.log("换牌失败：没有找到换牌按钮")
             return False
 
-        time.sleep(1.0)
+        if not self.sleep_with_pause(1.0):
+            return False
 
         attack_count, _ = self.count_template(
             "attack.png",
@@ -2058,7 +2295,8 @@ class GameBot:
             self.log("将灵技能失败：没有找到第一次 confirm.png")
             return False
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return False
 
         select_found = self.wait_any_template(
             ["select_figure.png", "select_figure_2.png"],
@@ -2090,16 +2328,18 @@ class GameBot:
             return False
 
         self.log("将灵技能：确认李傕后休息 1 秒")
-        time.sleep(1.0)
+        if not self.sleep_with_pause(1.0):
+            return False
 
-        self.log("将灵技能：开始持续检测 increase_damage.png / xiaorui.png")
+        self.log("将灵技能：开始持续检测可用弹窗")
         self.handle_after_lijue_prompts(duration=3.0)
 
         if target_template:
             self.log(f"将灵技能：弹窗检测结束，休息 1 秒后等待 {target_template}")
         else:
             self.log("将灵技能：当前武将无部位选择技能效果，休息 1 秒后跳过该流程")
-        time.sleep(1.0)
+        if not self.sleep_with_pause(1.0):
+            return False
 
         head_result = self.click_head_target()
 
@@ -2161,9 +2401,9 @@ class GameBot:
         max_card_attempts = 36
 
         for attempt in range(1, max_card_attempts + 1):
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("轲比能出牌阶段中止")
-                return "failed"
+                return "stopped"
 
             if self.paused:
                 time.sleep(0.2)
@@ -2191,7 +2431,8 @@ class GameBot:
 
                 if not allow_next_turn:
                     rejected_card_xs = []
-                    time.sleep(0.6)
+                    if not self.sleep_with_pause(0.6):
+                        return "stopped"
                     continue
 
                 clear_result = self.clear_cancel_until_acquire(timeout=30)
@@ -2206,7 +2447,7 @@ class GameBot:
 
                 if clear_result == "stopped":
                     self.log("轲比能出牌阶段中止")
-                    return "failed"
+                    return "stopped"
 
                 rejected_card_xs = []
                 continue
@@ -2219,6 +2460,10 @@ class GameBot:
             )
 
             result = self.try_kebineng_play_one_card(card_x, card_y)
+
+            if result == "stopped":
+                self.log("轲比能出牌阶段中止")
+                return "stopped"
 
             if result == "played":
                 rejected_card_xs = []
@@ -2239,7 +2484,8 @@ class GameBot:
                     self.log("轲比能出牌阶段：当前为直接出牌轮，休息后继续尝试候选手牌")
                     rejected_card_xs = []
                     miss_count = 0
-                    time.sleep(0.6)
+                    if not self.sleep_with_pause(0.6):
+                        return "stopped"
                     continue
 
                 clear_result = self.clear_cancel_until_acquire(timeout=30)
@@ -2254,7 +2500,7 @@ class GameBot:
 
                 if clear_result == "stopped":
                     self.log("轲比能出牌阶段中止")
-                    return "failed"
+                    return "stopped"
 
                 self.log("轲比能出牌阶段：清理阶段未检测到胜利或下一轮，继续尝试")
                 rejected_card_xs = []
@@ -2290,7 +2536,8 @@ class GameBot:
             desc="整理手牌-第一次"
         )
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return "stopped"
 
         self.log("出牌阶段：第二次点击整理手牌")
         self.click_template(
@@ -2299,7 +2546,8 @@ class GameBot:
             desc="整理手牌-第二次"
         )
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return "stopped"
 
         if not self.click_template(
             "attack.png",
@@ -2309,7 +2557,8 @@ class GameBot:
             self.log("出牌阶段失败：没有找到 attack.png")
             return "failed"
 
-        time.sleep(0.5)
+        if not self.sleep_with_pause(0.5):
+            return "stopped"
 
         select_found = self.wait_any_template(
             ["select_figure.png", "select_figure_2.png"],
@@ -2341,16 +2590,18 @@ class GameBot:
             return "failed"
 
         self.log("出牌阶段：确认李傕后休息 1 秒")
-        time.sleep(1.0)
+        if not self.sleep_with_pause(1.0):
+            return "stopped"
 
-        self.log("出牌阶段：开始持续检测 increase_damage.png / xiaorui.png")
+        self.log("出牌阶段：开始持续检测可用弹窗")
         self.handle_after_lijue_prompts(duration=3.0)
 
         if target_template:
             self.log(f"出牌阶段：弹窗检测结束，休息 1.5 秒后等待 {target_template}")
         else:
             self.log("出牌阶段：当前武将无部位选择技能效果，休息 1.5 秒后跳过该流程")
-        time.sleep(1.5)
+        if not self.sleep_with_pause(1.5):
+            return "stopped"
 
         head_result = self.wait_head_after_attack(timeout=10)
 
@@ -2594,7 +2845,7 @@ class GameBot:
         start_time = time.time()
 
         while time.time() - start_time < max_seconds:
-            if self.stop_flag:
+            if self.check_stop_requested():
                 self.log("收到停止信号，退出牌局循环测试")
                 return False
 
@@ -2675,7 +2926,7 @@ class GameBot:
             self.log("完整流程：连续运行已停止")
 
         except pyautogui.FailSafeException:
-            self.log("触发 FailSafe：鼠标移动到左上角，脚本停止")
+            self.request_stop("触发 FailSafe：鼠标移动到左上角，脚本停止")
 
         except Exception as e:
             self.log(f"完整流程异常：{e}")

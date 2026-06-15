@@ -120,17 +120,21 @@
 
 | 参数 | 中文含义 | 说明 |
 |---|---|---|
-| `THRESH_BUTTON` | 通用按钮阈值 | 用于开始挑战、取消、整理手牌、全选等普通按钮 |
+| `THRESH_BUTTON` | 通用按钮阈值 | 用于开始挑战、取消、整理手牌等普通按钮 |
 | `THRESH_SMALL` | 小图标/提示阈值 | 用于 `select_figure.png`、`select_figure_2.png` |
-| `THRESH_CARD` | 手牌识别阈值 | 用于识别 `attack.png`、`kebineng_card_marker.png` 等手牌相关模板 |
+| `THRESH_CARD` | 手牌识别阈值 | 用于识别 `attack.png` 等通用手牌模板 |
 | `THRESH_BOSS` | Boss 头像阈值 | 用于识别 `lijue.png` |
 | `THRESH_HEAD` | 人体图阈值 | 用于识别 `head.png` |
 | `THRESH_VICTORY` | 胜利界面阈值 | 用于识别 `victory.png` |
 | `THRESH_SAVE` | 求桃阈值 | 用于识别 `save.png` |
-| `THRESH_ACQUIRE` | 武将技能阈值 | 用于识别 `acquire.png`、`koujing.png` |
+| `THRESH_ACQUIRE` | 武将技能阈值 | 用于识别 `acquire.png` |
 | `THRESH_REQUIRE` | 将灵技能询问阈值 | 用于识别 `require.png` |
 | `THRESH_POPUP` | 弹窗技能阈值 | 用于识别 `increase_damage.png` 和 `xiaorui.png` |
 | `THRESH_CONFIRM` | 确认按钮阈值 | 用于识别 `confirm.png` |
+| `THRESH_SELECT_KEBINENG` | 轲比能选将阈值 | 用于识别 `select_kebineng.png` |
+| `THRESH_KOUJING` | 寇旌技能阈值 | 用于识别 `koujing.png` |
+| `THRESH_KEBINENG_CARD_MARKER` | 轲比能手牌标记阈值 | 用于识别 `kebineng_card_marker.png` |
+| `THRESH_SELECT_ALL` | 全选按钮阈值 | 用于识别 `select_all.png`，默认比普通按钮更严格 |
 
 ### 2. 推荐初始阈值
 
@@ -148,6 +152,10 @@ THRESH_ACQUIRE  = 0.60
 THRESH_REQUIRE  = 0.75
 THRESH_POPUP    = 0.55
 THRESH_CONFIRM  = 0.55
+THRESH_SELECT_KEBINENG        = 0.65
+THRESH_KOUJING                = 0.60
+THRESH_KEBINENG_CARD_MARKER   = 0.70
+THRESH_SELECT_ALL             = 0.75
 ```
 
 ### 3. 什么时候调高阈值？

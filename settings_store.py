@@ -22,6 +22,10 @@ class BotSettings:
 
     THRESH_POPUP: float = 0.55
     THRESH_CONFIRM: float = 0.55
+    THRESH_SELECT_KEBINENG: float = 0.65
+    THRESH_KOUJING: float = 0.60
+    THRESH_KEBINENG_CARD_MARKER: float = 0.70
+    THRESH_SELECT_ALL: float = 0.75
 
     SUPERVISION_ENABLED: bool = True
     SUPERVISION_MIN_CONF: float = 0.50
@@ -80,7 +84,7 @@ THRESHOLD_META = [
     {
         "name": "THRESH_ACQUIRE",
         "title": "武将技能阈值",
-        "desc": "用于 acquire.png / koujing.png，也就是武将技能提示识别。",
+        "desc": "用于 acquire.png，也就是神黄忠武将技能提示识别。",
     },
     {
         "name": "THRESH_REQUIRE",
@@ -96,6 +100,26 @@ THRESHOLD_META = [
         "name": "THRESH_CONFIRM",
         "title": "确认按钮阈值",
         "desc": "用于 confirm.png，点确定时使用。",
+    },
+    {
+        "name": "THRESH_SELECT_KEBINENG",
+        "title": "轲比能选将阈值",
+        "desc": "用于 select_kebineng.png，也就是选将搜索结果卡面。",
+    },
+    {
+        "name": "THRESH_KOUJING",
+        "title": "寇旌技能阈值",
+        "desc": "用于 koujing.png，也就是轲比能出牌阶段的寇旌提示。",
+    },
+    {
+        "name": "THRESH_KEBINENG_CARD_MARKER",
+        "title": "轲比能手牌标记阈值",
+        "desc": "用于 kebineng_card_marker.png，也就是手牌上的寇旌杀标记。",
+    },
+    {
+        "name": "THRESH_SELECT_ALL",
+        "title": "全选按钮阈值",
+        "desc": "用于 select_all.png。该按钮紧挨整理手牌，默认比普通按钮更严格。",
     },
 ]
 

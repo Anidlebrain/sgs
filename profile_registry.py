@@ -8,6 +8,7 @@ class GeneralProfile:
     name: str
     search_text: str
     select_template: Optional[str]
+    select_threshold_name: str
     select_desc: str
     skill_template: str
     skill_threshold_name: str
@@ -46,6 +47,7 @@ AVAILABLE_GENERAL_PROFILES = {
         name="神黄忠",
         search_text="shenhuangzhong ",
         select_template="select_hero.png",
+        select_threshold_name="THRESH_BUTTON",
         select_desc="选择武将-神黄忠",
         skill_template="acquire.png",
         skill_threshold_name="THRESH_ACQUIRE",
@@ -59,9 +61,10 @@ AVAILABLE_GENERAL_PROFILES = {
         name="轲比能",
         search_text="kebineng ",
         select_template="select_kebineng.png",
+        select_threshold_name="THRESH_SELECT_KEBINENG",
         select_desc="选择武将-轲比能",
         skill_template="koujing.png",
-        skill_threshold_name="THRESH_ACQUIRE",
+        skill_threshold_name="THRESH_KOUJING",
         skill_desc="寇旌",
         target_template=None,
         target_threshold_name="THRESH_HEAD",
