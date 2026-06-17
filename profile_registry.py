@@ -105,6 +105,12 @@ AVAILABLE_COMBO_PROFILES = {
         general_profile_key="kebineng",
         spirit_profile_key="shen_caocao",
     ),
+    "kebineng_cao_chun": ComboProfile(
+        key="kebineng_cao_chun",
+        name="轲比能 + 曹纯",
+        general_profile_key="kebineng",
+        spirit_profile_key=DEFAULT_SPIRIT_PROFILE_KEY,
+    ),
 }
 
 

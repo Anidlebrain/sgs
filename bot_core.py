@@ -910,11 +910,17 @@ class GameBot:
     # 将灵技能询问检测
     # -------------------------
 
+    def has_spirit_skill_prompt(self):
+        return bool(
+            getattr(self.spirit_profile, "prompt_template", None)
+            and getattr(self.spirit_profile, "prompt_threshold_name", None)
+        )
+
     def detect_require_prompt(self):
         template_name = self.spirit_profile.prompt_template
         threshold_name = self.spirit_profile.prompt_threshold_name
 
-        if not template_name or not threshold_name:
+        if not self.has_spirit_skill_prompt():
             self.log(f"{self.spirit_profile.name} 没有将灵技能触发模板，跳过检测")
             return False
 
@@ -1844,6 +1850,9 @@ class GameBot:
 
         return points
 
+    def should_require_kebineng_marked_cards(self):
+        return getattr(self.spirit_profile, "key", None) == "cao_chun"
+
     def choose_kebineng_hand_card_point(self, rejected_xs):
         marker_points = self.detect_kebineng_card_marker_points()
 
@@ -1851,6 +1860,10 @@ class GameBot:
             points = [(x, y) for x, y, _ in marker_points]
             source = "寇旌杀模板识别"
         else:
+            if self.should_require_kebineng_marked_cards():
+                source = "寇旌杀模板识别（曹纯组合不回退普通手牌）"
+                return None, [], source
+
             points = self.detect_kebineng_hand_card_points()
             source = "截图识别"
 
@@ -2274,7 +2287,7 @@ class GameBot:
 
         self.log(f"执行牌局阶段③：将灵技能阶段（{self.spirit_profile.name}）")
 
-        if not template_name or not self.spirit_profile.prompt_threshold_name:
+        if not self.has_spirit_skill_prompt():
             self.log(f"{self.spirit_profile.name} 无将灵技能触发，本阶段跳过")
             return True
 
@@ -2396,6 +2409,21 @@ class GameBot:
             self.log("轲比能出牌阶段：跳过寇旌/全选，直接按手牌坐标出牌")
             anchor = self.kebineng_last_select_all_anchor
 
+        if require_koujing and self.has_spirit_skill_prompt():
+            self.log(f"轲比能出牌阶段：寇旌确认完成，等待 {self.spirit_profile.name} 将灵技能提示")
+            if not self.sleep_with_pause(1.0):
+                return "stopped"
+
+            repairing_result = self.battle_phase_repairing_skill()
+
+            if repairing_result == "victory":
+                self.log("轲比能出牌阶段：将灵技能阶段检测到胜利")
+                return "victory"
+
+            if not repairing_result:
+                self.log("轲比能出牌阶段中断：将灵技能阶段失败")
+                return "failed"
+
         rejected_card_xs = []
         miss_count = 0
         max_card_attempts = 36
@@ -2411,12 +2439,6 @@ class GameBot:
 
             if self.detect_victory_quiet("轲比能出牌阶段"):
                 return "victory"
-
-            if allow_next_turn:
-                prompt_region = self.skill_popup_search_region()
-                if self.detect_current_general_skill_quiet("轲比能出牌阶段", region=prompt_region):
-                    self.log("轲比能出牌阶段：检测到下一轮寇旌提示")
-                    return "next_turn"
 
             card_point, card_points, point_source = self.choose_kebineng_hand_card_point(rejected_card_xs)
 
@@ -2739,7 +2761,7 @@ class GameBot:
                 return "victory"
 
             if attack_result == "next_turn":
-                self.log("轲比能牌局循环：进入后续直接出牌轮")
+                self.log("轲比能牌局循环：进入后续直接识别手牌出牌轮")
                 require_koujing = False
                 continue
 

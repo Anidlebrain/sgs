@@ -220,13 +220,13 @@ class BotUI:
 
         ttk.Label(
             note_frame,
-            text="当前内置：神黄忠/曹纯、轲比能/神曹操。",
+            text="当前内置：神黄忠/曹纯、轲比能/神曹操、轲比能/曹纯。",
             style="PanelText.TLabel"
         ).pack(anchor="w", padx=8, pady=(6, 2))
 
         ttk.Label(
             note_frame,
-            text="轲比能的寇旌与手牌出牌循环已接入；神曹操按无将灵技能处理。",
+            text="轲比能的寇旌与手牌出牌循环已接入；曹纯将灵技能会在寇旌后触发。",
             style="PanelText.TLabel",
             wraplength=320,
             justify="left"
