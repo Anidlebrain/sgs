@@ -1493,9 +1493,10 @@ class GameBot:
         出牌阶段未检测到 victory 后调用。
 
         逻辑：
-        1. 持续检测 cancel.png，有就点击。
-        2. 等待当前武将的技能阶段模板出现。
-        3. 如果 timeout 秒内没等到武将技能模板，再额外检测一次 victory.png。
+        1. 持续检测 victory.png，出现后立即返回胜利。
+        2. 持续检测 cancel.png，有就点击。
+        3. 等待当前武将的技能阶段模板出现。
+        4. 如果 timeout 秒内没等到武将技能模板，再额外检测一次 victory.png。
            - 有 victory.png：返回 victory，让完整流程进入下一局。
            - 没有 victory.png：返回 timeout。
         """
@@ -1514,6 +1515,16 @@ class GameBot:
             if self.paused:
                 time.sleep(0.2)
                 continue
+
+            victory_found = self.find_template_quiet(
+                "victory.png",
+                threshold=self.settings.THRESH_VICTORY
+            )
+
+            if victory_found is not None:
+                x, y, conf = victory_found
+                self.log(f"清理阶段检测到 victory.png | 置信度={conf:.3f} | 判定本局胜利")
+                return "victory"
 
             acquire_found = self.find_template_quiet(
                 template_name,
@@ -2003,10 +2014,6 @@ class GameBot:
             return "no_confirm"
 
         self.log("轲比能出牌阶段：已出一张手牌并确认李傕")
-        self.log("轲比能出牌阶段：等待 2 秒过场动画")
-        if not self.sleep_with_pause(2.0):
-            return "stopped"
-
         self.handle_after_lijue_prompts(duration=1.5)
 
         if self.check_stop_requested():
