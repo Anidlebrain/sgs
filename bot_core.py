@@ -1,6 +1,7 @@
 ﻿import time
 import random
 import threading
+import subprocess
 from pathlib import Path
 from datetime import datetime
 
@@ -10,7 +11,7 @@ import pyautogui
 
 from app_paths import DEBUG_DIR, LEARNED_TEMPLATE_DIR, TEMPLATE_DIR
 from profile_registry import resolve_general_profile, resolve_spirit_profile
-from settings_store import BotSettings
+from settings_store import BotSettings, format_log_record, infer_log_level
 from template_registry import get_template_display_name, get_template_meta
 
 
@@ -27,6 +28,7 @@ class GameBot:
         settings=None,
         minimize_func=None,
         supervision_func=None,
+        shutdown_prompt_func=None,
         general_profile=None,
         spirit_profile=None,
     ):
@@ -34,12 +36,14 @@ class GameBot:
         self.settings = settings or BotSettings()
         self.minimize_func = minimize_func
         self.supervision_func = supervision_func
+        self.shutdown_prompt_func = shutdown_prompt_func
         self.general_profile = resolve_general_profile(general_profile)
         self.spirit_profile = resolve_spirit_profile(spirit_profile)
 
         self.running = False
         self.paused = False
         self.stop_flag = False
+        self.shutdown_after_stop_for_run = False
 
         self.click_lock = threading.Lock()
         self.supervision_lock = threading.Lock()
@@ -57,16 +61,124 @@ class GameBot:
     # 日志
     # -------------------------
 
-    def log(self, text):
-        now = datetime.now().strftime("%H:%M:%S")
-        self.log_func(f"[{now}] {text}")
+    def log(self, text, level=None):
+        level = level or infer_log_level(text)
+
+        try:
+            self.log_func(text, level=level)
+        except TypeError:
+            self.log_func(format_log_record(text, level))
 
     def request_stop(self, reason=None):
         if reason and not self.stop_flag:
-            self.log(reason)
+            self.log(reason, level="warn")
 
         self.stop_flag = True
         self.running = False
+
+    def set_shutdown_after_stop_for_run(self, enabled):
+        self.shutdown_after_stop_for_run = bool(enabled)
+
+    def format_step_result(self, result):
+        if result is True:
+            return "成功"
+        if result is False:
+            return "失败"
+        if result is None:
+            return "无返回"
+        return str(result)
+
+    def finish_timed_step(self, step_name, start_time, result=None, level=None):
+        elapsed = time.perf_counter() - start_time
+        result_text = self.format_step_result(result)
+
+        if level is None:
+            if result in (False, "failed", "stopped", "timeout"):
+                level = "warn"
+            else:
+                level = "info"
+
+        self.log(
+            f"[耗时] {step_name}：{elapsed:.2f} 秒 | 结果={result_text}",
+            level=level
+        )
+
+    def timed_call(self, step_name, func, *args, **kwargs):
+        start_time = time.perf_counter()
+        self.log(f"[步骤] {step_name} 开始", level="debug")
+
+        try:
+            result = func(*args, **kwargs)
+        except Exception:
+            self.finish_timed_step(step_name, start_time, result="异常", level="error")
+            raise
+
+        self.finish_timed_step(step_name, start_time, result=result)
+        return result
+
+    def timed_sleep(self, step_name, seconds):
+        return self.timed_call(step_name, self.sleep_with_pause, seconds)
+
+    def cancel_pending_shutdown(self):
+        try:
+            subprocess.run(
+                ["shutdown", "/a"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.log("自动关机：已取消本次系统关机倒计时", level="warn")
+            return True
+        except Exception as e:
+            self.log(f"自动关机取消失败：{e}", level="error")
+            return False
+
+    def schedule_shutdown_countdown(self, seconds=30):
+        try:
+            subprocess.run(
+                [
+                    "shutdown",
+                    "/s",
+                    "/t",
+                    str(seconds),
+                    "/c",
+                    f"李傕列传完整流程已停止，{seconds} 秒后自动关机。",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+        except Exception as e:
+            self.log(f"自动关机启动失败：{e}", level="error")
+            return False
+
+        self.log(
+            f"自动关机：已启动 {seconds} 秒倒计时；如需取消请在确认窗口选择取消关机",
+            level="warn"
+        )
+        return True
+
+    def handle_shutdown_after_stop(self):
+        if not self.shutdown_after_stop_for_run:
+            return
+
+        self.shutdown_after_stop_for_run = False
+
+        seconds = 30
+        if not self.schedule_shutdown_countdown(seconds=seconds):
+            return
+
+        if self.shutdown_prompt_func is None:
+            return
+
+        try:
+            should_cancel = self.shutdown_prompt_func(seconds=seconds)
+        except Exception as e:
+            self.log(f"自动关机确认弹窗异常：{e}", level="error")
+            return
+
+        if should_cancel:
+            self.cancel_pending_shutdown()
 
     def check_stop_requested(self):
         if self.stop_flag:
@@ -145,18 +257,18 @@ class GameBot:
 
     def resize_all_browser_windows(self, width=1280, height=800, move_to_left_top=True):
         """
-        将当前所有常见浏览器窗口统一调整为指定尺寸。
+        将三国杀所在的常见浏览器窗口调整为指定尺寸。
 
         这样完整流程开始前，游戏浏览器的画面比例会先固定，
         后续模板匹配更稳定。
 
         说明：
-        1. 不寻找具体游戏窗口，只处理所有浏览器窗口。
+        1. 只处理标题包含“三国杀”的常见浏览器窗口。
         2. 自动排除本工具窗口“李傕列传”。
         3. 如果窗口处于最大化状态，会先 restore，再 resize。
         4. 默认把浏览器移动到左上角，方便模板在固定画面下匹配。
         """
-        self.log(f"完整流程第一步：调整所有浏览器窗口为 {width}x{height}")
+        self.log(f"完整流程第一步：调整三国杀浏览器窗口为 {width}x{height}")
 
         browser_keywords = [
             "chrome",
@@ -176,6 +288,7 @@ class GameBot:
             "搜狗高速",
             "uc浏览器",
         ]
+        game_title_keywords = ["三国杀"]
 
         try:
             windows = pyautogui.getAllWindows()
@@ -204,12 +317,13 @@ class GameBot:
                 continue
 
             is_browser = any(key in lower_title for key in browser_keywords)
+            is_game_window = any(key in title for key in game_title_keywords)
 
-            if not is_browser:
+            if not (is_browser and is_game_window):
                 continue
 
             try:
-                self.log(f"调整浏览器窗口：{title}")
+                self.log(f"调整三国杀浏览器窗口：{title}")
 
                 # 最大化窗口必须先还原，否则 resizeTo 可能无效
                 if getattr(win, "isMaximized", False):
@@ -241,10 +355,10 @@ class GameBot:
                 self.log(f"调整窗口失败：{title} | {e}")
 
         if changed_count == 0:
-            self.log("没有检测到浏览器窗口，跳过窗口尺寸调整")
+            self.log("没有检测到标题包含“三国杀”的浏览器窗口，跳过窗口尺寸调整")
             return False
 
-        self.log(f"浏览器窗口尺寸调整完成，共处理 {changed_count} 个窗口")
+        self.log(f"三国杀浏览器窗口尺寸调整完成，共处理 {changed_count} 个窗口")
         return True
 
     # -------------------------
@@ -2695,20 +2809,23 @@ class GameBot:
             turn_id += 1
             self.log(f"========== 牌局循环：第 {turn_id} 轮 ==========")
 
-            if self.stage_check_victory():
+            if self.timed_call("牌局循环/检测胜利", self.stage_check_victory):
                 self.log("牌局循环：检测到胜利")
                 return "victory"
 
             self.log("牌局循环：进入武将技能阶段")
-            if not self.battle_phase_acquire_skill():
+            if not self.timed_call("牌局循环/武将技能阶段", self.battle_phase_acquire_skill):
                 self.log("牌局循环提示：武将技能阶段未成功，继续尝试后续阶段")
 
             self.log("牌局循环：武将技能阶段结束，等待 2 秒")
-            if not self.sleep_with_pause(2):
+            if not self.timed_sleep("牌局循环/武将技能后等待", 2):
                 return "stopped"
 
             self.log("牌局循环：进入将灵技能阶段")
-            repairing_result = self.battle_phase_repairing_skill()
+            repairing_result = self.timed_call(
+                "牌局循环/将灵技能阶段",
+                self.battle_phase_repairing_skill
+            )
 
             if repairing_result == "victory":
                 self.log("牌局循环：将灵技能阶段检测到胜利")
@@ -2719,11 +2836,11 @@ class GameBot:
                 return "failed"
 
             self.log("牌局循环：将灵技能阶段结束，等待 2 秒")
-            if not self.sleep_with_pause(2):
+            if not self.timed_sleep("牌局循环/将灵技能后等待", 2):
                 return "stopped"
 
             self.log("牌局循环：进入出牌阶段")
-            attack_result = self.battle_phase_attack()
+            attack_result = self.timed_call("牌局循环/出牌阶段", self.battle_phase_attack)
 
             if attack_result == "victory":
                 self.log("牌局循环：出牌阶段检测到胜利")
@@ -2749,7 +2866,7 @@ class GameBot:
             turn_id += 1
             self.log(f"========== 轲比能牌局循环：第 {turn_id} 轮 ==========")
 
-            if self.stage_check_victory():
+            if self.timed_call("轲比能牌局循环/检测胜利", self.stage_check_victory):
                 self.log("轲比能牌局循环：检测到胜利")
                 return "victory"
 
@@ -2758,7 +2875,9 @@ class GameBot:
             else:
                 self.log("轲比能牌局循环：跳过武将/将灵技能阶段，直接出牌")
 
-            attack_result = self.battle_phase_attack_kebineng(
+            attack_result = self.timed_call(
+                "轲比能牌局循环/出牌阶段",
+                self.battle_phase_attack_kebineng,
                 require_koujing=require_koujing,
                 allow_next_turn=require_koujing
             )
@@ -2902,47 +3021,101 @@ class GameBot:
 
         self.stop_flag = False
         self.running = True
+        try:
+            max_game_count = int(getattr(self.settings, "MAX_GAME_COUNT", -1))
+        except (TypeError, ValueError):
+            max_game_count = -1
+            self.log("完整流程：局数设定无效，已按 -1 持续运行处理", level="warn")
 
-        # 所有流程第一步：统一调整所有浏览器窗口尺寸
-        self.resize_all_browser_windows(width=1280, height=800, move_to_left_top=True)
+        if max_game_count < -1:
+            self.log("完整流程：局数设定小于 -1，已按 -1 持续运行处理", level="warn")
+            max_game_count = -1
 
-        # 等待窗口尺寸和页面重绘稳定，否则后续模板匹配可能对不上
-        if not self.sleep_with_pause(1.0):
+        if max_game_count == 0:
+            self.log("完整流程：局数设定为 0，本次不启动牌局", level="warn")
             self.running = False
+            self.shutdown_after_stop_for_run = False
             return
 
+        if max_game_count > 0:
+            self.log(f"完整流程：局数限制={max_game_count} 局")
+        else:
+            self.log("完整流程：局数限制=-1，按原模式持续运行")
+
         game_id = 0
+        completed_games = 0
 
         try:
+            # 所有流程第一步：统一调整所有浏览器窗口尺寸
+            self.timed_call(
+                "完整流程/调整浏览器窗口",
+                self.resize_all_browser_windows,
+                width=1280,
+                height=800,
+                move_to_left_top=True
+            )
+
+            # 等待窗口尺寸和页面重绘稳定，否则后续模板匹配可能对不上
+            if not self.timed_sleep("完整流程/等待窗口稳定", 1.0):
+                return
+
             while not self.stop_flag:
+                if max_game_count > 0 and completed_games >= max_game_count:
+                    self.log(
+                        f"完整流程：已完成设定局数 {max_game_count}，自动停止",
+                        level="info"
+                    )
+                    break
+
                 game_id += 1
                 self.log(f"========== 完整流程：第 {game_id} 局开始 ==========")
 
                 self.log("完整流程：点击开始挑战")
-                if not self.stage_start_challenge():
+                if not self.timed_call(
+                    f"第 {game_id} 局/开始挑战",
+                    self.stage_start_challenge
+                ):
                     self.log("完整流程中断：开始挑战失败")
                     break
 
                 self.log("完整流程：开始挑战后等待 5 秒")
-                if not self.sleep_with_pause(5):
+                if not self.timed_sleep(f"第 {game_id} 局/开始挑战后等待", 5):
                     break
 
                 self.log("完整流程：进入换牌阶段")
-                if not self.battle_phase_change_cards():
+                if not self.timed_call(
+                    f"第 {game_id} 局/换牌阶段",
+                    self.battle_phase_change_cards
+                ):
                     self.log("完整流程中断：换牌阶段失败")
                     break
 
                 self.log("完整流程：换牌阶段结束，等待 5 秒")
-                if not self.sleep_with_pause(5):
+                if not self.timed_sleep(f"第 {game_id} 局/换牌后等待", 5):
                     break
 
                 self.log("完整流程：进入牌局循环")
-                result = self.run_battle_until_victory(max_turns=30)
+                result = self.timed_call(
+                    f"第 {game_id} 局/牌局循环",
+                    self.run_battle_until_victory,
+                    max_turns=30
+                )
 
                 if result == "victory":
-                    self.log("完整流程：本局胜利，等待 5 秒后进入下一局")
-                    if not self.sleep_with_pause(5):
+                    completed_games += 1
+                    self.log(f"完整流程：第 {game_id} 局胜利，已完成 {completed_games} 局")
+
+                    if max_game_count > 0 and completed_games >= max_game_count:
+                        self.log(
+                            f"完整流程：已达到设定局数 {max_game_count}，自动停止",
+                            level="info"
+                        )
                         break
+
+                    self.log("完整流程：本局胜利，等待 5 秒后进入下一局")
+                    if not self.timed_sleep(f"第 {game_id} 局/胜利后等待", 5):
+                        break
+
                     continue
 
                 if result == "stopped":
@@ -2963,3 +3136,4 @@ class GameBot:
         finally:
             self.running = False
             self.log("完整流程结束")
+            self.handle_shutdown_after_stop()

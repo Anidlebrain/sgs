@@ -22,6 +22,12 @@ from settings_store import (
     THRESHOLD_META,
     DEFAULT_SETTING_VALUES,
     SETTINGS_FILE,
+    LOG_LEVEL_NAMES,
+    format_log_record,
+    infer_log_level,
+    is_valid_log_level,
+    normalize_log_level,
+    should_emit_log,
     load_bot_settings,
     save_bot_settings,
 )
@@ -299,6 +305,7 @@ class BotUI:
             settings=self.settings,
             minimize_func=self.minimize_ui,
             supervision_func=self.confirm_template_supervision,
+            shutdown_prompt_func=self.confirm_shutdown_countdown,
             general_profile=self.general_profile,
             spirit_profile=self.spirit_profile,
         )
@@ -307,13 +314,16 @@ class BotUI:
         self.configure_file_logging(announce=True)
         self.write_log(
             f"[入口] 当前组合：{self.combo_profile.name}；"
-            f"武将：{self.general_profile.name}；将灵：{self.spirit_profile.name}"
+            f"武将：{self.general_profile.name}；将灵：{self.spirit_profile.name}",
+            force=True
         )
 
         if self.settings_loaded:
-            self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}")
+            self.write_log(f"[设置] 已读取本地阈值：{SETTINGS_FILE}", force=True)
+            if self.settings_load_error:
+                self.write_log(f"[设置] {self.settings_load_error}", level="warn", force=True)
         elif self.settings_load_error:
-            self.write_log(f"[设置] {self.settings_load_error}，已使用默认阈值")
+            self.write_log(f"[设置] {self.settings_load_error}，已使用默认阈值", level="warn", force=True)
 
     # =========================================================
     # 主 UI
@@ -443,7 +453,7 @@ class BotUI:
             flow_frame,
             text="完整流程",
             style="Gold.TButton",
-            command=lambda: self.run_in_thread(self.bot.run_one_full_cycle)
+            command=self.start_full_cycle
         ).pack(fill="x", padx=7, pady=5)
 
         # -------------------------
@@ -552,6 +562,11 @@ class BotUI:
         scrollbar.pack(side="right", fill="y", pady=5, padx=(0, 5))
 
         self.log_text.configure(yscrollcommand=scrollbar.set)
+        self.log_text.tag_configure("trace", foreground="#8f8068")
+        self.log_text.tag_configure("debug", foreground="#bca77f")
+        self.log_text.tag_configure("info", foreground="#f6e6bd")
+        self.log_text.tag_configure("warn", foreground="#ffd36b")
+        self.log_text.tag_configure("error", foreground="#ff7777")
 
         hint = ttk.Label(
             main,
@@ -567,7 +582,7 @@ class BotUI:
     def open_threshold_settings(self):
         win = tk.Toplevel(self.root)
         win.title("设置")
-        win.geometry("560x690+945+258")
+        win.geometry("560x760+945+258")
         win.resizable(False, False)
         win.attributes("-topmost", True)
         win.configure(bg="#1f1a14")
@@ -745,10 +760,14 @@ class BotUI:
 
         debug_row = supervision_row + 1
         log_to_file_var = tk.BooleanVar(value=self.settings.LOG_TO_FILE)
+        log_level_var = tk.StringVar(
+            value=normalize_log_level(getattr(self.settings, "LOG_LEVEL", "info")).upper()
+        )
 
         debug_frame = tk.Frame(panel, bg="#2b2118")
         debug_frame.grid(row=debug_row, column=0, sticky="ew", padx=10, pady=(8, 3))
         debug_frame.columnconfigure(0, weight=1)
+        debug_frame.columnconfigure(1, weight=0)
 
         log_check = tk.Checkbutton(
             debug_frame,
@@ -775,7 +794,116 @@ class BotUI:
             justify="left",
             wraplength=420
         )
-        log_tip.grid(row=1, column=0, sticky="w", pady=(0, 0))
+        log_tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 0))
+
+        log_level_label = tk.Label(
+            debug_frame,
+            text="日志级别",
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#2b2118",
+            fg="#ffe0a0",
+            anchor="w"
+        )
+        log_level_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        log_level_combo = ttk.Combobox(
+            debug_frame,
+            textvariable=log_level_var,
+            values=[name.upper() for name in LOG_LEVEL_NAMES],
+            state="readonly",
+            width=8,
+            font=("Consolas", 9)
+        )
+        log_level_combo.grid(row=2, column=1, sticky="e", padx=(8, 0), pady=(6, 0))
+
+        log_level_tip = tk.Label(
+            debug_frame,
+            text="trace 最详细，error 最安静；低于当前级别的日志不会显示或写入文件。",
+            font=("Microsoft YaHei", 7),
+            bg="#2b2118",
+            fg="#cdbb92",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        log_level_tip.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 0))
+
+        runtime_row = debug_row + 1
+        max_game_count_var = tk.StringVar(
+            value=str(getattr(self.settings, "MAX_GAME_COUNT", -1))
+        )
+        shutdown_after_stop_var = tk.BooleanVar(
+            value=getattr(self.settings, "SHUTDOWN_AFTER_STOP", False)
+        )
+
+        runtime_frame = tk.Frame(panel, bg="#2b2118")
+        runtime_frame.grid(row=runtime_row, column=0, sticky="ew", padx=10, pady=(8, 3))
+        runtime_frame.columnconfigure(0, weight=1)
+        runtime_frame.columnconfigure(1, weight=0)
+
+        max_game_label = tk.Label(
+            runtime_frame,
+            text="完整流程局数上限（MAX_GAME_COUNT）",
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#2b2118",
+            fg="#ffe0a0",
+            anchor="w"
+        )
+        max_game_label.grid(row=0, column=0, sticky="w")
+
+        max_game_spin = tk.Spinbox(
+            runtime_frame,
+            from_=-1,
+            to=9999,
+            increment=1,
+            textvariable=max_game_count_var,
+            width=7,
+            font=("Consolas", 9),
+            bg="#14100c",
+            fg="#f6e6bd",
+            insertbackground="#f6e6bd",
+            buttonbackground="#3a2a18",
+            relief="ridge"
+        )
+        max_game_spin.grid(row=0, column=1, sticky="e", padx=(8, 0))
+
+        max_game_tip = tk.Label(
+            runtime_frame,
+            text="-1 表示保持原来的持续运行模式；正整数表示胜利完成指定局数后自动停止。",
+            font=("Microsoft YaHei", 7),
+            bg="#2b2118",
+            fg="#cdbb92",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        max_game_tip.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 4))
+
+        shutdown_check = tk.Checkbutton(
+            runtime_frame,
+            text="完整流程停止后自动关机",
+            variable=shutdown_after_stop_var,
+            font=("Microsoft YaHei", 8, "bold"),
+            bg="#2b2118",
+            fg="#ffe0a0",
+            selectcolor="#14100c",
+            activebackground="#2b2118",
+            activeforeground="#ffe0a0",
+            anchor="w"
+        )
+        shutdown_check.grid(row=2, column=0, sticky="w")
+
+        shutdown_tip = tk.Label(
+            runtime_frame,
+            text="开启后点击完整流程会二次确认；流程停止时启动 30 秒关机倒计时，可在确认窗口取消。",
+            font=("Microsoft YaHei", 7),
+            bg="#2b2118",
+            fg="#cdbb92",
+            anchor="w",
+            justify="left",
+            wraplength=420
+        )
+        shutdown_tip.grid(row=3, column=0, columnspan=2, sticky="w", pady=(0, 0))
 
         # =====================================================
         # 底部按钮
@@ -814,6 +942,24 @@ class BotUI:
             if supervision_min_value is not None and not 0 <= supervision_min_value <= 1:
                 errors.append("SUPERVISION_MIN_CONF 必须在 0 到 1 之间")
 
+            max_game_text = max_game_count_var.get().strip()
+
+            try:
+                max_game_count_value = int(max_game_text)
+            except ValueError:
+                errors.append("MAX_GAME_COUNT 不是有效整数")
+                max_game_count_value = None
+
+            if max_game_count_value is not None and max_game_count_value != -1 and max_game_count_value <= 0:
+                errors.append("MAX_GAME_COUNT 必须为 -1 或正整数")
+
+            log_level_value = log_level_var.get().strip().lower()
+
+            if not is_valid_log_level(log_level_value):
+                errors.append("LOG_LEVEL 必须是 trace/debug/info/warn/error")
+            else:
+                log_level_value = normalize_log_level(log_level_value)
+
             if errors:
                 messagebox.showerror(
                     "阈值设置错误",
@@ -828,14 +974,17 @@ class BotUI:
             self.settings.SUPERVISION_ENABLED = supervision_enabled_var.get()
             self.settings.SUPERVISION_MIN_CONF = supervision_min_value
             self.settings.LOG_TO_FILE = log_to_file_var.get()
+            self.settings.LOG_LEVEL = log_level_value
+            self.settings.MAX_GAME_COUNT = max_game_count_value
+            self.settings.SHUTDOWN_AFTER_STOP = shutdown_after_stop_var.get()
 
             saved, save_error = save_bot_settings(self.settings)
 
             if saved:
                 self.configure_file_logging(announce=True)
-                self.write_log(f"[设置] 已更新并保存：{SETTINGS_FILE}")
+                self.write_log(f"[设置] 已更新并保存：{SETTINGS_FILE}", force=True)
             else:
-                self.write_log(f"[设置] 已更新，但{save_error}")
+                self.write_log(f"[设置] 已更新，但{save_error}", level="warn", force=True)
                 messagebox.showwarning(
                     "设置保存失败",
                     f"设置已在本次运行中生效，但没有写入本地文件。\n{save_error}",
@@ -857,6 +1006,9 @@ class BotUI:
             supervision_enabled_var.set(DEFAULT_SETTING_VALUES["SUPERVISION_ENABLED"])
             supervision_min_var.set(f"{DEFAULT_SETTING_VALUES['SUPERVISION_MIN_CONF']:.2f}")
             log_to_file_var.set(DEFAULT_SETTING_VALUES["LOG_TO_FILE"])
+            log_level_var.set(str(DEFAULT_SETTING_VALUES["LOG_LEVEL"]).upper())
+            max_game_count_var.set(str(DEFAULT_SETTING_VALUES["MAX_GAME_COUNT"]))
+            shutdown_after_stop_var.set(DEFAULT_SETTING_VALUES["SHUTDOWN_AFTER_STOP"])
 
         apply_btn = tk.Button(
             button_frame,
@@ -920,7 +1072,7 @@ class BotUI:
             self.log_file_path = None
 
             if announce and had_log_file:
-                self.write_log("[日志] 文件日志已关闭")
+                self.write_log("[日志] 文件日志已关闭", force=True)
 
             return None
 
@@ -932,7 +1084,7 @@ class BotUI:
             self.log_file_path = LOG_DIR / filename
 
         if announce:
-            self.write_log(f"[日志] 文件日志已启用：{self.log_file_path}")
+            self.write_log(f"[日志] 文件日志已启用：{self.log_file_path}", force=True)
 
         return self.log_file_path
 
@@ -993,6 +1145,94 @@ class BotUI:
             self.write_log("[UI] 主窗口已最小化")
         except Exception as e:
             self.write_log(f"[UI] 最小化失败：{e}")
+
+    def start_full_cycle(self):
+        if self.bot is None:
+            return
+
+        if self.bot.running:
+            self.write_log("[流程] 完整流程已在运行中", level="warn", force=True)
+            return
+
+        shutdown_for_run = False
+
+        if getattr(self.settings, "SHUTDOWN_AFTER_STOP", False):
+            shutdown_for_run = messagebox.askyesno(
+                "自动关机确认",
+                (
+                    "设置中已开启“完整流程停止后自动关机”。\n\n"
+                    "是否在本次完整流程中启用？\n"
+                    "启用后，完整流程停止时会启动 30 秒系统关机倒计时。"
+                ),
+                parent=self.root
+            )
+
+            if shutdown_for_run:
+                self.write_log(
+                    "[自动关机] 本次完整流程停止后将启动 30 秒关机倒计时",
+                    level="warn",
+                    force=True
+                )
+            else:
+                self.write_log(
+                    "[自动关机] 本次完整流程不启用自动关机",
+                    level="info",
+                    force=True
+                )
+
+        self.bot.set_shutdown_after_stop_for_run(shutdown_for_run)
+        self.run_in_thread(self.bot.run_one_full_cycle)
+
+    def confirm_shutdown_countdown(self, seconds):
+        result = {"cancel": False}
+        done = threading.Event()
+
+        def ask_on_ui_thread():
+            try:
+                result["cancel"] = self.open_shutdown_countdown_dialog(seconds)
+            finally:
+                done.set()
+
+        if threading.current_thread() is threading.main_thread():
+            ask_on_ui_thread()
+        else:
+            self.root.after(0, ask_on_ui_thread)
+            done.wait()
+
+        return result["cancel"]
+
+    def open_shutdown_countdown_dialog(self, seconds):
+        try:
+            previous_state = self.root.state()
+        except Exception:
+            previous_state = "normal"
+
+        try:
+            if previous_state == "iconic":
+                self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            pass
+
+        self.write_log(
+            f"[自动关机] 系统将在 {seconds} 秒后关机，等待用户取消确认",
+            level="warn",
+            force=True
+        )
+
+        cancel_shutdown = messagebox.askyesno(
+            "自动关机倒计时",
+            (
+                f"完整流程已停止，Windows 已启动 {seconds} 秒后自动关机。\n\n"
+                "点击“是”取消本次关机；如果不处理，将按系统倒计时关机。"
+            ),
+            parent=self.root
+        )
+
+        if previous_state == "iconic":
+            self.root.after(100, self.root.iconify)
+
+        return cancel_shutdown
 
     def confirm_template_supervision(self, template_name, confidence, threshold, image):
         result = {"accepted": False}
@@ -1147,11 +1387,18 @@ class BotUI:
 
         return result["accepted"]
 
-    def write_log(self, text):
-        self.write_log_to_file(text)
+    def write_log(self, text, level=None, force=False):
+        level = normalize_log_level(level or infer_log_level(text))
+        configured_level = getattr(self.settings, "LOG_LEVEL", "info") if self.settings is not None else "info"
+
+        if not force and not should_emit_log(level, configured_level):
+            return
+
+        record = format_log_record(text, level)
+        self.write_log_to_file(record)
 
         if hasattr(self, "log_text"):
-            self.log_text.insert("end", text + "\n")
+            self.log_text.insert("end", record + "\n", level)
             self.log_text.see("end")
             self.root.update_idletasks()
 

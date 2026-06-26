@@ -24,6 +24,7 @@ learned_templates/
 .env
 .env.*
 *.log
+settings.json
 
 # IDE and OS files
 .idea/
